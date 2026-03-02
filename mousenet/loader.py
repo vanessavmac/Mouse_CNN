@@ -1,6 +1,7 @@
 from doctest import REPORTING_FLAGS
 import pickle
 import os
+import cloudpickle as pickle_lib
 from .cmouse.mousenet_complete_pool import MouseNetCompletePool
 import torch.nn as nn
 import pathlib
@@ -13,9 +14,20 @@ import os, pdb
 def generate_net(retinotopic=False):
     root = pathlib.Path(__file__).parent.resolve()
     cached = os.path.join(root, "data_files", f"net_cache_{'retino' if retinotopic else ''}.pkl")
+    arch_cached = os.path.join(root, "data_files", "architecture.pkl")
+    
     if os.path.isfile(cached):
         return network.load_network_from_pickle(cached)
-    architecture = Architecture()
+
+    if os.path.isfile(arch_cached):
+        with open(arch_cached, "rb") as f:
+            architecture = pickle_lib.load(f)
+    else:
+        architecture = Architecture()
+        os.makedirs(os.path.dirname(arch_cached), exist_ok=True)
+        with open(arch_cached, "wb") as f:
+            pickle_lib.dump(architecture, f)
+    
     anet = gen_anatomy(architecture)
     net = network.Network(retinotopic=retinotopic)
     net.construct_from_anatomy(anet, architecture)
@@ -36,7 +48,6 @@ def load(architecture, pretraining=None):
     #     pdb.set_trace()
 
     net = generate_net(retinotopic= architecture=="retinotopic")
-    mousenet = MouseNetCompletePool(net)
         
     retinomap = None
     if architecture =="retinotopic":

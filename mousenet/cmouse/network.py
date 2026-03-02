@@ -3,12 +3,13 @@ import networkx as nx
 from .anatomy import gen_anatomy
 import torch
 from torch import nn
-from .exps.imagenet.config import INPUT_SIZE, EDGE_Z, INPUT_GSH, INPUT_GSW, get_out_sigma
+from .exps.imagenet.config import INPUT_SIZE, EDGE_Z, INPUT_GSH, INPUT_GSW, get_out_sigma, DLGN_ON_RGCS_CHANNELS, DLGN_OFF_RGCS_CHANNELS, DLGN_ON_OFF_RGCS_CHANNELS, DLGN_OTHER_RGCS_CHANNELS
 import os
 import pickle
 import matplotlib.pyplot as plt
 import pathlib
 import pdb
+from .retina import MouseRetinaLayer
 class ConvParam:
     def __init__(self, in_channels, out_channels, gsh, gsw, out_sigma):
         """
@@ -46,6 +47,21 @@ class ConvLayer:
         self.target_name = target_name
         self.out_size = out_size
 
+class NonConvParam:
+    def __init__(self, out_channels):
+        self.out_channels = out_channels
+
+class NonConvLayer:
+    def __init__(self, params, source_name, target_name, layer, out_size):
+        """
+        :param params: NonConvParam containing the parameters of the layer
+        :param layer: layer object (make sure this is a torch layer nn.Module) that can be called in forward pass
+        """
+        self.params = params
+        self.layer = layer
+        self.source_name = source_name
+        self.target_name = target_name
+        self.out_size = out_size
 
 class Network:
     """
@@ -75,10 +91,31 @@ class Network:
         :param anet: anatomy class which contains anatomical connections
         :param architecture: architecture class which calls set_num_channels for calculating connection strength
         """
-        # construct conv layer for input -> LGNd
         self.area_channels['input'] = INPUT_SIZE[0]
         self.area_size['input'] = INPUT_SIZE[1]
+
+        # construct RGCs → dLGN relay neurons → visual cortex    
+        # NOTE: RGCs in the retina send their axons directly to synapse onto dLGN relay 
+        # (thalamocortical) neurons, which then project to cortical layer 4 
+        # (SOURCE: https://pmc.ncbi.nlm.nih.gov/articles/PMC6380502/)     
+        dLGN_projecting_rgcs_layer = MouseRetinaLayer(
+                num_rgb_dog_output_channels=(DLGN_ON_RGCS_CHANNELS, DLGN_OFF_RGCS_CHANNELS, DLGN_ON_OFF_RGCS_CHANNELS, DLGN_OTHER_RGCS_CHANNELS), 
+                rgb_kernel_size=9
+            )   
+        out_channels = dLGN_projecting_rgcs_layer.out_channels
+
+        dLGN_projecting_rgcs = NonConvLayer(
+            params=NonConvParam(out_channels=out_channels),
+            layer=dLGN_projecting_rgcs_layer, 
+            source_name='input', target_name='RGCdLGN', out_size=INPUT_SIZE[1]
+        )
         
+        architecture.set_num_channels('RGCdLGN', '', out_channels)
+        self.area_channels['RGCdLGN'] = out_channels
+        self.area_size['RGCdLGN'] = INPUT_SIZE[1]
+        self.layers.append(dLGN_projecting_rgcs)
+
+        # Use a 1x1 conv to model dLGN relay neurons (model only the excitatory neurons)
         out_sigma = 1
         out_channels = np.floor(anet.find_layer('LGNd','').num/out_sigma/INPUT_SIZE[1]/INPUT_SIZE[2])
         architecture.set_num_channels('LGNd', '', out_channels)
@@ -87,12 +124,12 @@ class Network:
         out_size =  INPUT_SIZE[1] * out_sigma
         self.area_size['LGNd'] = out_size
        
-        convlayer = ConvLayer('input', 'LGNd',
-                              ConvParam(in_channels=INPUT_SIZE[0], 
-                                        out_channels=out_channels,
-                                        gsh=INPUT_GSH,
-                                        gsw=INPUT_GSW, out_sigma=out_sigma),
-                              out_size)
+        convlayer = ConvLayer('RGCdLGN', 'LGNd',
+                        ConvParam(in_channels=dLGN_projecting_rgcs.layer.out_channels, 
+                                out_channels=out_channels,
+                                gsh=INPUT_GSH,
+                                gsw=0, out_sigma=out_sigma), # gsw=0 means kernel size of 1 since RGCdLGN already account for complete receptive field size
+                        out_size)
         self.layers.append(convlayer)
        
         # construct conv layers for all other connections

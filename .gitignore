@@ -113,6 +113,7 @@ wandb/
 pics/
 .pkl
 .tar
+data_files/
 
 mouse_connectivity_models/
 

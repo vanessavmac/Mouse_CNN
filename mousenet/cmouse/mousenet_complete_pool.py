@@ -6,6 +6,7 @@ import numpy as np
 import pathlib, os
 import pickle
 from .exps.imagenet.config import  INPUT_SIZE, EDGE_Z, OUTPUT_AREAS, HIDDEN_LINEAR, NUM_CLASSES
+from .network import ConvLayer, NonConvLayer
 import pdb
 
 def get_retinotopic_mask(layer, retinomap):
@@ -47,9 +48,9 @@ class Conv2dMask(nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernel_size, gsh, gsw, mask=3, stride=1, padding=0):
         super(Conv2dMask, self).__init__(in_channels, out_channels, kernel_size, stride=stride)
         self.mypadding = nn.ConstantPad2d(padding, 0)
-        if mask == 0:
-            self.mask = None
-        if mask==1:
+        if gsh == 0 or gsw == 0 or mask == 0:
+            self.mask = None # special case, kernel size is 1, so no Gaussian mask applied
+        elif mask==1:
             self.mask = nn.Parameter(torch.Tensor(self.make_gaussian_kernel_mask(gsh, gsw)))
         elif mask ==2:
             self.mask = nn.Parameter(torch.Tensor(self.make_gaussian_kernel_mask(gsh, gsw)), requires_grad=False) 
@@ -106,6 +107,7 @@ class MouseNetCompletePool(nn.Module):
         super(MouseNetCompletePool, self).__init__()
         self.Convs = nn.ModuleDict()
         self.BNs = nn.ModuleDict()
+        self.Retina = nn.ModuleDict()
         self.network = network
         self.retinomap = retinomap
         
@@ -113,43 +115,26 @@ class MouseNetCompletePool(nn.Module):
         self.top_sort = list(nx.topological_sort(G))
 
         for layer in network.layers:
-            params = layer.params
-            self.Convs[layer.source_name + layer.target_name] = Conv2dMask(params.in_channels, params.out_channels, params.kernel_size,
-                                                    params.gsh, params.gsw, stride=params.stride, mask=mask, padding=params.padding)
-            ## plotting Gaussian mask
-            #plt.title('%s_%s_%sx%s'%(e[0].replace('/',''), e[1].replace('/',''), params.kernel_size, params.kernel_size))
-            #plt.savefig('%s_%s'%(e[0].replace('/',''), e[1].replace('/','')))
-            if layer.target_name not in self.BNs:
-                self.BNs[layer.target_name] = nn.BatchNorm2d(params.out_channels)
-
-        # calculate total size output to classifier
-        total_size=0
-        
-        for area in OUTPUT_AREAS:
-            layer = network.find_conv_source_target('%s2/3'%area[:-1],'%s'%area)
-            total_size += int(16*layer.params.out_channels)
-        #     if area =='VISp5':
-        #         layer = network.find_conv_source_target('VISp2/3','VISp5')
-        #         visp_out = layer.params.out_channels
-        #         # create 1x1 Conv downsampler for VISp5
-        #         visp_downsample_channels = visp_out
-        #         ds_stride = 2
-        #         self.visp5_downsampler = nn.Conv2d(visp_out, visp_downsample_channels, 1, stride=ds_stride)
-        #         total_size += INPUT_SIZE[1]/ds_stride * INPUT_SIZE[2]/ds_stride * visp_downsample_channels
-        #     else:
-        #         layer = network.find_conv_source_target('%s2/3'%area[:-1],'%s'%area)
-        #         total_size += int(layer.out_size*layer.out_size*layer.params.out_channels)
-        
-        # self.classifier = nn.Sequential(
-            # nn.Linear(int(total_size), NUM_CLASSES),
-            # nn.Linear(int(total_size), HIDDEN_LINEAR),
-            # nn.ReLU(True),
-            # nn.Dropout(),
-            # nn.Linear(HIDDEN_LINEAR, HIDDEN_LINEAR),
-            # nn.ReLU(True),
-            # nn.Dropout(),
-            # nn.Linear(HIDDEN_LINEAR, NUM_CLASSES),
-        # )
+            if layer.__class__ == ConvLayer:
+                params = layer.params
+                self.Convs[layer.source_name + layer.target_name] = Conv2dMask(params.in_channels, params.out_channels, params.kernel_size,
+                                                        params.gsh, params.gsw, stride=params.stride, mask=mask, padding=params.padding)
+                ## plotting Gaussian mask
+                #plt.title('%s_%s_%sx%s'%(e[0].replace('/',''), e[1].replace('/',''), params.kernel_size, params.kernel_size))
+                #plt.savefig('%s_%s'%(e[0].replace('/',''), e[1].replace('/','')))
+                if layer.target_name not in self.BNs:
+                    self.BNs[layer.target_name] = nn.BatchNorm2d(params.out_channels)
+            elif layer.__class__ == NonConvLayer:
+                params = layer.params
+                if layer.target_name == "RGCdLGN":
+                    self.Retina[layer.source_name + layer.target_name] = layer.layer
+                    
+                    if layer.target_name not in self.BNs:
+                        self.BNs[layer.target_name] = nn.BatchNorm2d(params.out_channels)
+                else:
+                    raise NotImplementedError("Only Retina NonConvLayer is implemented for now!")
+            else:
+                raise NotImplementedError("Layer type not recognized!")
 
     def get_img_feature(self, x, area_list, flatten=False):
         """
@@ -164,11 +149,17 @@ class MouseNetCompletePool(nn.Module):
         for area in self.top_sort:
             if area == 'input':
                 continue
-   
-            if area == 'LGNd' or area == 'LGNv':
+            
+            if area == 'RGCdLGN':
                 layer = self.network.find_conv_source_target('input', area)
                 layer_name = layer.source_name + layer.target_name
-                calc_graph[area] =  nn.ReLU(inplace=True)(self.BNs[area](self.Convs[layer_name](x)))
+                calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](self.Retina[layer_name](x)))
+                continue
+            
+            if area == 'LGNd' or area == 'LGNv':
+                layer = self.network.find_conv_source_target('RGCdLGN', area)
+                layer_name = layer.source_name + layer.target_name
+                calc_graph[area] =  nn.ReLU(inplace=True)(self.BNs[area](self.Convs[layer_name](calc_graph[layer.source_name])))
                 continue
 
             for layer in self.network.layers:
