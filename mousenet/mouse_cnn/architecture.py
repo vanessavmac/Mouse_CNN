@@ -44,7 +44,7 @@ class Architecture(Data):
     def get_kernel_peak_probability(self, source_area, source_layer, target_area, target_layer):
         if source_area == target_area: # from interlaminar hit rates
             return self.get_hit_rate_peak(source_layer, target_layer)
-        elif 'LGN' in source_area:
+        elif 'LGN' in source_area or 'sSC' in source_area:
             return 1
         else: # from mesoscale model
             target = self.targets[_get_name(target_area, target_layer)]
@@ -78,7 +78,7 @@ class Architecture(Data):
         if source_area == target_area: # from interlaminar hit rate spatial profile
             width_micrometers = self.get_hit_rate_width(source_layer, target_layer)
             return width_micrometers * self._get_pixels_per_micrometer(source_area, source_layer)
-        elif 'LGN' in source_area:
+        elif 'LGN' in source_area or 'sSC' in source_area:
             return 1
         else: # from mesoscale model
             target = self.targets[_get_name(target_area, target_layer)]

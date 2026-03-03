@@ -31,9 +31,11 @@ def generate_net(retinotopic=False):
     anet = gen_anatomy(architecture)
     net = network.Network(retinotopic=retinotopic)
     net.construct_from_anatomy(anet, architecture)
+    # NOTE: Temporarily disable caching to test building
     network.save_network_to_pickle(net, cached)
     return net
 
+# NOTE: ENTRY POINT FOR MODEL LOADING; I always use mousenet_stock and no pretraining
 def load(architecture, pretraining=None):
     if architecture not in ("default", "retinotopic"):
         raise ValueError("Architecture must be one of default or retinotopic")  

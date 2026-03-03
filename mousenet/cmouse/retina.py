@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .exps.imagenet.config import INPUT_SIZE
 from .exps.imagenet.config import LUM_CHANNEL
+
 class MouseRetinaLayer(nn.Module):
     def __init__(self, num_rgb_dog_output_channels, rgb_kernel_size, sigma_c=5.61, sigma_s=16.98):
         """"
@@ -35,7 +36,7 @@ class MouseRetinaLayer(nn.Module):
         self.conv_off = nn.Conv2d(1, off_channels, kernel_size=1)
         self.conv_on_off = nn.Conv2d(1, on_off_channels, kernel_size=1)
 
-        # TODO: Make this a sparse Conv2d?
+        # TODO ASK TRIPP: Make this a sparse Conv2d - I think ye definitely this should be INPUT_GSH and INPUT_GSW
         self.conv_other = nn.Conv2d(3, other_channels, kernel_size=rgb_kernel_size, padding=rgb_kernel_size // 2)
 
         self.out_channels = on_channels + off_channels + on_off_channels + other_channels
@@ -57,7 +58,7 @@ class MouseRetinaLayer(nn.Module):
 
     def forward(self, x):
         # x shape: [Batch, 4, 64, 64] (RGB + LUV-L)
-        lum = x[:, LUM_CHANNEL, :, :] 
+        lum = x[:, LUM_CHANNEL:LUM_CHANNEL+1, :, :]
         rgb = x[:, :LUM_CHANNEL, :, :]
         
         # Fixed DoG Filtering
@@ -77,7 +78,7 @@ class MouseRetinaLayer(nn.Module):
         feat_on = self.conv_on(pure_on)
         feat_off = self.conv_off(pure_off)
         feat_on_off = self.conv_on_off(mix_on_off)
-        feat_other = F.relu(self.conv_other(rgb))
+        feat_other = self.conv_other(rgb)
 
         # Final Features to the model are [ON...OFF...ON-OFF...OTHER...]
         return torch.cat([feat_on, feat_off, feat_on_off, feat_other], dim=1)

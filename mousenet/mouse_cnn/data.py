@@ -22,8 +22,9 @@ class Data:
         # return ['LGNd', 'VISp', 'VISal', 'VISpor']
 
         #return ['LGNd', 'VISp', 'VISl', 'VISpor']
-
-        return ['LGNd', 'VISp', 'VISl', 'VISrl', 'VISli', 'VISpl', 'VISal', 'VISpor']
+        
+        # NOTE: The LP is not modelled as an area, but as a set of SFT pathways connecting areas
+        return ['sSC', 'LGNd', 'VISp', 'VISl', 'VISrl', 'VISli', 'VISpl', 'VISal', 'VISpor']
     def get_layers(self):
         """
         :return: list of cortical layers included in model
@@ -37,7 +38,7 @@ class Data:
             analysis
         """
         hierarchy = {
-            'LGNd': 0,
+            'LGNd': 0, 'sSC': 0,
             'VISp': 1,
             'VISl': 2, 'VISrl': 2, 'VISli': 2, 'VISpl': 2, 'VISal': 2,
             'VISpor': 3
@@ -51,6 +52,11 @@ class Data:
         :return: estimate of number of excitatory neurons in given area/layer
         """
         numbers = { 'LGNd':21200,
+                    # TODO ASK TRIPP: could you explain how "Combined with the number of 10μm voxels counted 
+                    # in the Allen Mouse Brain Common Coordinate Framework (CCFv3" -- not sure what specific 
+                    # number I need? and how to convert density to neuron number?
+                    'sSC': 27334, # From neuron number at https://bbp.epfl.ch/nexus/cell-atlas/
+                    # 'LPn': 31000, # From Mousenet [49], not required since LP is not modelled as an area
                     'VISp2/3': 173253,
                     'VISl2/3': 22299,
                     'VISrl2/3': 22598,
@@ -72,7 +78,7 @@ class Data:
                     'VISpl5': 20041,
                     'VISal5': 15939,
                     'VISpor5': 30230}
-        if area == 'LGNd':
+        if area == 'LGNd' or area == 'sSC':
             region = area
         else:
             region = '%s%s'%(area, layer) 
@@ -280,7 +286,7 @@ def check_all_kernels():
     This takes something like 20 minutes to run.
     """
     data = Data()
-    cortical_areas = [area for area in data.get_areas() if not area == 'LGNd']
+    cortical_areas = [area for area in data.get_areas() if not area == 'LGNd' and not area == 'sSC']
     for target_area in cortical_areas:
         for source_area in cortical_areas:
             if data.get_hierarchical_level(source_area) < data.get_hierarchical_level(target_area):

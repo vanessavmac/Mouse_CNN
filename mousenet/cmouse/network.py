@@ -3,13 +3,16 @@ import networkx as nx
 from .anatomy import gen_anatomy
 import torch
 from torch import nn
-from .exps.imagenet.config import INPUT_SIZE, EDGE_Z, INPUT_GSH, INPUT_GSW, get_out_sigma, DLGN_ON_RGCS_CHANNELS, DLGN_OFF_RGCS_CHANNELS, DLGN_ON_OFF_RGCS_CHANNELS, DLGN_OTHER_RGCS_CHANNELS
+from .exps.imagenet.config import INPUT_SIZE, EDGE_Z, INPUT_GSH, INPUT_GSW, get_out_sigma, DLGN_ON_RGCS_CHANNELS, DLGN_OFF_RGCS_CHANNELS, DLGN_ON_OFF_RGCS_CHANNELS, DLGN_OTHER_RGCS_CHANNELS, SC_ON_RGCS_CHANNELS, SC_OFF_RGCS_CHANNELS, SC_ON_OFF_RGCS_CHANNELS, SC_OTHER_RGCS_CHANNELS
 import os
 import pickle
 import matplotlib.pyplot as plt
 import pathlib
 import pdb
 from .retina import MouseRetinaLayer
+from .sSC import MousesSCLayer
+from .lp_connections import LP_PATHWAYS, SFTLayer
+
 class ConvParam:
     def __init__(self, in_channels, out_channels, gsh, gsw, out_sigma):
         """
@@ -72,18 +75,18 @@ class Network:
         self.area_channels = {}
         self.area_size = {}
         self.retinotopic = retinotopic
-        
-    def find_conv_source_target(self, source_name, target_name):
+
+    def find_layer_by_source_target(self, source_name, target_name, layer_type):
         for layer in self.layers:
-            if layer.source_name == source_name and layer.target_name == target_name:
+            if layer.source_name == source_name and layer.target_name == target_name and layer.__class__.__name__ == layer_type:
                 return layer
-        assert('no conv layer found!')
+        raise ValueError(f"No layer found with source {source_name} and target {target_name} and type {layer_type}")
     
     def find_conv_target_area(self, target_name):
         for layer in self.layers:
-            if layer.target_name == target_name:
+            if layer.target_name == target_name and layer.__class__.__name__ == ConvLayer.__name__:
                 return layer
-        assert('no conv layer found!')
+        raise ValueError(f"No conv layer found with target {target_name}")
         
     def construct_from_anatomy(self, anet, architecture):
         """
@@ -94,9 +97,45 @@ class Network:
         self.area_channels['input'] = INPUT_SIZE[0]
         self.area_size['input'] = INPUT_SIZE[1]
 
-        # construct RGCs → dLGN relay neurons → visual cortex    
+
+        ############################################
+        # construct RGCs -> sSC
+        sSC_projecting_rgcs_layer = MouseRetinaLayer(
+                num_rgb_dog_output_channels=(SC_ON_RGCS_CHANNELS, SC_OFF_RGCS_CHANNELS, SC_ON_OFF_RGCS_CHANNELS, SC_OTHER_RGCS_CHANNELS),
+                rgb_kernel_size=9
+            )
+        out_channels = sSC_projecting_rgcs_layer.out_channels
+        
+        sSC_projecting_rgcs = NonConvLayer(
+            params=NonConvParam(out_channels=out_channels),
+            layer=sSC_projecting_rgcs_layer, 
+            source_name='input', target_name='RGCsSC', out_size=INPUT_SIZE[1]
+        )
+        architecture.set_num_channels('RGCsSC', '', out_channels)
+        self.area_channels['RGCsSC'] = out_channels
+        self.area_size['RGCsSC'] = INPUT_SIZE[1]
+        self.layers.append(sSC_projecting_rgcs)
+
+        # Wide-field cells take direct input from RGCs and project to the LP
+        out_sigma = 1
+        out_size = INPUT_SIZE[1] * out_sigma
+        sSC_out_channels = int(np.floor(anet.find_layer('sSC','').num/out_sigma/INPUT_SIZE[1]/INPUT_SIZE[2]))
+        sSC_layer = MousesSCLayer(in_channels=self.area_channels['RGCsSC'], out_channels=sSC_out_channels)
+        sSC_nonconv_layer = NonConvLayer(
+            params=NonConvParam(out_channels=sSC_out_channels),
+            layer=sSC_layer,
+            source_name='RGCsSC', target_name='sSC', out_size=out_size
+        )
+        architecture.set_num_channels('sSC', '', sSC_out_channels)
+        self.area_channels['sSC'] = sSC_out_channels
+        self.area_size['sSC'] = out_size
+        self.layers.append(sSC_nonconv_layer)
+
+
+        ############################################
+        # construct RGCs → dLGN
         # NOTE: RGCs in the retina send their axons directly to synapse onto dLGN relay 
-        # (thalamocortical) neurons, which then project to cortical layer 4 
+        # (thalamocortical) neurons, which then project to cortical layer 4
         # (SOURCE: https://pmc.ncbi.nlm.nih.gov/articles/PMC6380502/)     
         dLGN_projecting_rgcs_layer = MouseRetinaLayer(
                 num_rgb_dog_output_channels=(DLGN_ON_RGCS_CHANNELS, DLGN_OFF_RGCS_CHANNELS, DLGN_ON_OFF_RGCS_CHANNELS, DLGN_OTHER_RGCS_CHANNELS), 
@@ -117,25 +156,34 @@ class Network:
 
         # Use a 1x1 conv to model dLGN relay neurons (model only the excitatory neurons)
         out_sigma = 1
-        out_channels = np.floor(anet.find_layer('LGNd','').num/out_sigma/INPUT_SIZE[1]/INPUT_SIZE[2])
-        architecture.set_num_channels('LGNd', '', out_channels)
-        self.area_channels['LGNd'] = out_channels
-        
-        out_size =  INPUT_SIZE[1] * out_sigma
+        out_size = INPUT_SIZE[1] * out_sigma
+        dLGN_out_channels = int(np.floor(anet.find_layer('LGNd','').num/out_sigma/INPUT_SIZE[1]/INPUT_SIZE[2]))       
+        convlayer = ConvLayer(
+            params=ConvParam(
+                in_channels=self.area_channels['RGCdLGN'], 
+                out_channels=dLGN_out_channels,
+                gsh=INPUT_GSH,
+                gsw=0, out_sigma=out_sigma
+            ), # gsw=0 means kernel size of 1 since RGCdLGN already account for complete receptive field size
+            source_name='RGCdLGN', target_name='LGNd', out_size=out_size,
+        )   
+        architecture.set_num_channels('LGNd', '', dLGN_out_channels)
+        self.area_channels['LGNd'] = dLGN_out_channels
         self.area_size['LGNd'] = out_size
-       
-        convlayer = ConvLayer('RGCdLGN', 'LGNd',
-                        ConvParam(in_channels=dLGN_projecting_rgcs.layer.out_channels, 
-                                out_channels=out_channels,
-                                gsh=INPUT_GSH,
-                                gsw=0, out_sigma=out_sigma), # gsw=0 means kernel size of 1 since RGCdLGN already account for complete receptive field size
-                        out_size)
         self.layers.append(convlayer)
-       
+
+
+        ############################################
         # construct conv layers for all other connections
         G, _ = anet.make_graph()
         Gtop = nx.topological_sort(G)
         root = next(Gtop) # get root of graph
+
+        # DEBUGGING: NEATLY PRINT TOPOLOGICAL SORTING
+        print("DEBUG: TOPOLOGICAL SORTING OF ANATOMICAL NET:")
+        for i, node in enumerate(Gtop):
+            print(f"{i}: {node.area} {node.depth}")
+
         for i, e in enumerate(nx.edge_bfs(G, root)):
             
             in_layer_name = e[0].area+e[0].depth
@@ -151,7 +199,7 @@ class Network:
             out_sigma = get_out_sigma(e[0].area, e[0].depth, e[1].area, e[1].depth)
             out_size = in_size * out_sigma
             self.area_size[e[1].area+e[1].depth] = out_size
-            out_channels = np.floor(out_anat_layer.num/out_size**2)
+            out_channels = int(np.floor(out_anat_layer.num/out_size**2))
             if self.retinotopic:
                 project_root = pathlib.Path(__file__).parent.parent.resolve()
                 mask_pickle = ''.join(x for x in in_layer_name.lower() if x.isalpha())
@@ -173,13 +221,63 @@ class Network:
                                     out_size)
             
             self.layers.append(convlayer)
+
+        ############################################
+        # construct all modulatory SFT connections through the LP
+        # a single layer is created for each target area that receives modulatory input from the LP, 
+        # and the conditioning input to this layer is the concatenated feature maps from all source areas in the pathway.
+        for pathway in LP_PATHWAYS:
+            print(f"Constructing SFT layer for LP pathway with target {pathway['target']} and conditioning sources {pathway['sources']}")
+            conditioning_area_names = [area + depth if depth is not None else area for area, depth in pathway['sources']]
+            target_area_name = pathway['target'][0] + pathway['target'][1]
+            
+            num_source_channels = sum([self.area_channels[source_area] for source_area in conditioning_area_names])
+            assert all(source_area in self.area_channels for source_area in conditioning_area_names), \
+                f"Some source areas not found in area_channels: {[s for s in conditioning_area_names if s not in self.area_channels]}"
+
+            print(f"the area size of the target area {target_area_name} is {self.area_size[target_area_name]}")
+            print(f"the area of the source areas {conditioning_area_names} are {[self.area_size[source_area] for source_area in conditioning_area_names]}")
+
+            min_input_map_size = min([self.area_size[source_area] for source_area in conditioning_area_names])
+            max_input_map_size = max([self.area_size[source_area] for source_area in conditioning_area_names])
+
+            if min_input_map_size != max_input_map_size:
+                print(f"Input maps for SFT modulation of {target_area_name} have different spatial sizes {min_input_map_size} vs {max_input_map_size}.")
+                print(f"We assume that they will be adjusted to the smallest size {min_input_map_size} and then concatenated before being passed to the SFT layer.")
+
+            # Calculate the out_sigma for the SFT layer based on the target area size and the input feature map size
+            out_sigma = self.area_size[target_area_name] / min_input_map_size
+            print(f"Calculated out_sigma for SFT layer targeting {target_area_name} is {out_sigma}")
+            assert out_sigma in [0.5, 1], f"Calculated out_sigma {out_sigma} is not valid. Expected 0.5 or 1, corresponding to feature maps of size 32 or 64."
+
+            sft_layer = NonConvLayer(
+                params = None,
+                out_size = None,
+                source_name = conditioning_area_names,
+                target_name = target_area_name,
+                layer = SFTLayer(
+                    target_area_name=target_area_name,
+                    in_channels=num_source_channels, 
+                    out_channels=self.area_channels[target_area_name],
+                    # @TODO ASK TRIPP, to match mousenet, I used stride since i know feature maps either 64 or 32 (note that HVAs never modulate VISp/dLGN)
+                    stride = int(1/out_sigma),
+                ),
+            )
+            self.layers.append(sft_layer)
             
     def make_graph(self):
         """
         produce networkx graph
         """
         G = nx.DiGraph()
-        edges = [(p.source_name, p.target_name) for p in self.layers]
+        edges = []
+        for p in self.layers:
+            if isinstance(p.source_name, list):
+                # SFT layers have multiple sources
+                for source in p.source_name:
+                    edges.append((source, p.target_name))
+            else:
+                edges.append((p.source_name, p.target_name))
         for edge in edges:
             G.add_edge(edge[0], edge[1])
         node_label_dict = { layer:'%s\n%s'%(layer, int(self.area_channels[layer])) for layer in G.nodes()}
@@ -189,6 +287,7 @@ class Network:
         """
         draw the network structure
         """
+        # TODO: this only works for conv layers; need to add non-conv layers to drawing
         G, node_label_dict = self.make_graph()
         edge_label_dict = {(c.source_name, c.target_name):(c.params.kernel_size) for c in self.layers}
         plt.figure(figsize=(12,12))
