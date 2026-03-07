@@ -52,11 +52,8 @@ class Data:
         :return: estimate of number of excitatory neurons in given area/layer
         """
         numbers = { 'LGNd':21200,
-                    # TODO ASK TRIPP: could you explain how "Combined with the number of 10μm voxels counted 
-                    # in the Allen Mouse Brain Common Coordinate Framework (CCFv3" -- not sure what specific 
-                    # number I need? and how to convert density to neuron number?
                     'sSC': 27334, # From neuron number at https://bbp.epfl.ch/nexus/cell-atlas/
-                    # 'LPn': 31000, # From Mousenet [49], not required since LP is not modelled as an area
+                    'LPn': 31000, # From Mousenet [49], not required since LP is not modelled as an area
                     'VISp2/3': 173253,
                     'VISl2/3': 22299,
                     'VISrl2/3': 22598,
@@ -78,7 +75,7 @@ class Data:
                     'VISpl5': 20041,
                     'VISal5': 15939,
                     'VISpor5': 30230}
-        if area == 'LGNd' or area == 'sSC':
+        if area == 'LGNd' or area == 'sSC' or area == 'LPn':
             region = area
         else:
             region = '%s%s'%(area, layer) 

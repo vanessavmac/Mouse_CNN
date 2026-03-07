@@ -1,44 +1,66 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from .conv import Conv2dMask, ConvParam
 
-# TODO ASK TRIPP: about additional slide "For other regions without data, I will modulate all layers (2/3, 4, and 5)."?
+# [20] A. E. Allen, C. A. Procyk, M. Howarth, L. Walmsley, and T. M. Brown, “Visual 
+# input to the mouse lateral posterior and posterior thalamic nuclei: photoreceptive 
+# origins and retinotopic order,” The Journal of Physiology, vol. 594, no. 7, pp. 
+# 1911–1929, Apr. 2016, doi: 10.1113/JP271707.
+KERNEL_SIZE = 17
+
+# Modulatory pathways modelled (to layer 4 targets, consistent with feedforward and 
+# data from [24] N. Zhou, S. P. Masterson, J. K. Damron, W. Guido, and M. E. Bickford, 
+# “The Mouse Pulvinar Nucleus Links the Lateral Extrastriate Cortex, Striatum, and Amygdala.,” 
+# J Neurosci, vol. 38, no. 2, pp. 347–362, Jan. 2018, doi: 10.1523/JNEUROSCI.1279-17.2017.)
+
+# SC --> LP --> All HVAs
+# VISl5 --> LP --> VISrl, VISal
+# VISp5 --> LP --> VISl, VISal, VISrl
 LP_PATHWAYS = [
     {
         'sources': [('sSC', None), ('VISp', '5')],
         'target': ('VISl', '4'),
     },
     {
-        'sources': [('sSC', None), ('VISl', '5')],
-        'target': ('VISal', '2/3'),
+        'sources': [('sSC', None), ('VISl', '5'), ('VISp', '5')],
+        'target': ('VISrl', '4'),
     },
     {
-        'sources': [('sSC', None), ('VISl', '5')],
+        'sources': [('sSC', None), ('VISl', '5'), ('VISp', '5')],
         'target': ('VISal', '4'),
     },
-        {
-        'sources': [('sSC', None), ('VISl', '5')],
-        'target': ('VISal', '5'),
+    {
+        'sources': [('sSC', None)],
+        'target': ('VISli', '4'),
+    },
+    {
+        'sources': [('sSC', None)],
+        'target': ('VISpl', '4'),
+    },
+    {
+        'sources': [('sSC', None)],
+        'target': ('VISpor', '4'),
     },
 ]
 
-# TODO ASK TRIPP: what kernel size for the conditioning network (I just defaulted to 3?) and if it should be sparse Conv2d?
-# because how would we parameterize fan in connections of disynaptic LP pathways since we're using SFT?
 class SFTLayer(nn.Module):
     """
     Implement Spatial Feature Transform (SFT) layer.
 
     Stride ensures that the conditioning feature maps are appropriately downsampled to match the target feature map size.
-    TODO ASK TRIPP: I assumed fixed kernel size of 3 (just a random number...)
     """
 
-    def __init__(self, target_area_name, in_channels, out_channels, stride, kernel_size=3):
+    def __init__(self, target_area_name, in_channels, out_channels, out_sigma):
         super(SFTLayer, self).__init__()
         self.name = target_area_name # helpful for debugging
 
         # Ensure the scale and bias produced are the same size as the input x
-        self.scale_conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size//2, stride=stride)
-        self.bias_conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size//2, stride=stride)
+        gsw = (KERNEL_SIZE - 1) // 2
+        conv_params = ConvParam(in_channels=in_channels, out_channels=out_channels, gsh=1, gsw=gsw, out_sigma=out_sigma)
+        
+        self.scale_conv = Conv2dMask(conv_params.in_channels, conv_params.out_channels, conv_params.kernel_size, conv_params.gsh, conv_params.gsw, stride=conv_params.stride, padding=conv_params.padding)
+        self.bias_conv = Conv2dMask(conv_params.in_channels, conv_params.out_channels, conv_params.kernel_size, conv_params.gsh, conv_params.gsw, stride=conv_params.stride, padding=conv_params.padding)
+
 
     def forward(self, cond, x):
         print(f"SFTLayer targetting {self.name}: Conditioning input has dimension {cond.shape}, feature map input has dimension {x.shape}")

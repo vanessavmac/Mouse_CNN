@@ -1,70 +1,15 @@
 import numpy as np
 import networkx as nx
 from .anatomy import gen_anatomy
-import torch
-from torch import nn
-from .exps.imagenet.config import INPUT_SIZE, EDGE_Z, INPUT_GSH, INPUT_GSW, get_out_sigma, DLGN_ON_RGCS_CHANNELS, DLGN_OFF_RGCS_CHANNELS, DLGN_ON_OFF_RGCS_CHANNELS, DLGN_OTHER_RGCS_CHANNELS, SC_ON_RGCS_CHANNELS, SC_OFF_RGCS_CHANNELS, SC_ON_OFF_RGCS_CHANNELS, SC_OTHER_RGCS_CHANNELS
+from .exps.imagenet.config import INPUT_SIZE, EDGE_Z, DLGN_GSH, DLGN_GSW, get_out_sigma, DLGN_ON_RGCS_CHANNELS, DLGN_OFF_RGCS_CHANNELS, DLGN_ON_OFF_RGCS_CHANNELS, DLGN_OTHER_RGCS_CHANNELS, SC_ON_RGCS_CHANNELS, SC_OFF_RGCS_CHANNELS, SC_ON_OFF_RGCS_CHANNELS, SC_OTHER_RGCS_CHANNELS
 import os
 import pickle
 import matplotlib.pyplot as plt
 import pathlib
-import pdb
 from .retina import MouseRetinaLayer
 from .sSC import MousesSCLayer
 from .lp_connections import LP_PATHWAYS, SFTLayer
-
-class ConvParam:
-    def __init__(self, in_channels, out_channels, gsh, gsw, out_sigma):
-        """
-        :param in_channels: number of input channels
-        :param out_channels: number of output channels
-        :param gsh: Gaussian height for generating Gaussian mask 
-        :param gsw: Gaussian width for generating Gaussian mask
-        :param out_sigma: ratio between output size and input size, 1/2 means reduce output size to 1/2 of the input size
-        """
-
-        self.in_channels = int(in_channels)
-        self.out_channels = int(out_channels)
-        self.gsh = gsh
-        self.gsw = gsw
-        self.kernel_size = 2*int(self.gsw * EDGE_Z) + 1
-
-        KmS = int((self.kernel_size-1/out_sigma))
-        if np.mod(KmS,2)==0:
-            padding = int(KmS/2)
-        else:
-            padding = (int(KmS/2), int(KmS/2+1), int(KmS/2), int(KmS/2+1))
-        self.padding = padding
-        self.stride = int(1/out_sigma)
-        
-class ConvLayer:
-    def __init__(self, source_name, target_name, params, out_size):
-        """
-        :param params: ConvParam containing the parameters of the layer
-        :param source_name: name of the source area, e.g. VISp4, VISp2/3, VISp5
-        :param target_name: name of the target area
-        :param out_size: output size of the layer
-        """
-        self.params = params
-        self.source_name = source_name
-        self.target_name = target_name
-        self.out_size = out_size
-
-class NonConvParam:
-    def __init__(self, out_channels):
-        self.out_channels = out_channels
-
-class NonConvLayer:
-    def __init__(self, params, source_name, target_name, layer, out_size):
-        """
-        :param params: NonConvParam containing the parameters of the layer
-        :param layer: layer object (make sure this is a torch layer nn.Module) that can be called in forward pass
-        """
-        self.params = params
-        self.layer = layer
-        self.source_name = source_name
-        self.target_name = target_name
-        self.out_size = out_size
+from .conv import ConvLayer, NonConvLayer, ConvParam, NonConvParam
 
 class Network:
     """
@@ -100,9 +45,10 @@ class Network:
 
         ############################################
         # construct RGCs -> sSC
+        print("Constructing RGCs to sSC pathway...")
         sSC_projecting_rgcs_layer = MouseRetinaLayer(
                 num_rgb_dog_output_channels=(SC_ON_RGCS_CHANNELS, SC_OFF_RGCS_CHANNELS, SC_ON_OFF_RGCS_CHANNELS, SC_OTHER_RGCS_CHANNELS),
-                rgb_kernel_size=9
+                rgb_kernel_size=11 # NOTE: slide 22 in 499 presentation
             )
         out_channels = sSC_projecting_rgcs_layer.out_channels
         
@@ -116,10 +62,11 @@ class Network:
         self.area_size['RGCsSC'] = INPUT_SIZE[1]
         self.layers.append(sSC_projecting_rgcs)
 
-        # Wide-field cells take direct input from RGCs and project to the LP
+        # Wide-field cells take direct input from RGCs/sSC neurons and project to the LP
         out_sigma = 1
         out_size = INPUT_SIZE[1] * out_sigma
-        sSC_out_channels = int(np.floor(anet.find_layer('sSC','').num/out_sigma/INPUT_SIZE[1]/INPUT_SIZE[2]))
+        # NOTE: use the LPn number of neurons, since WF cells originate in the sSC and project to the LPn
+        sSC_out_channels = int(np.floor(anet.find_layer('LPn','').num/out_sigma/INPUT_SIZE[1]/INPUT_SIZE[2]))
         sSC_layer = MousesSCLayer(in_channels=self.area_channels['RGCsSC'], out_channels=sSC_out_channels)
         sSC_nonconv_layer = NonConvLayer(
             params=NonConvParam(out_channels=sSC_out_channels),
@@ -136,10 +83,11 @@ class Network:
         # construct RGCs → dLGN
         # NOTE: RGCs in the retina send their axons directly to synapse onto dLGN relay 
         # (thalamocortical) neurons, which then project to cortical layer 4
-        # (SOURCE: https://pmc.ncbi.nlm.nih.gov/articles/PMC6380502/)     
+        # (SOURCE: https://pmc.ncbi.nlm.nih.gov/articles/PMC6380502/)    
+        print("Constructing RGCs to dLGN pathway...") 
         dLGN_projecting_rgcs_layer = MouseRetinaLayer(
                 num_rgb_dog_output_channels=(DLGN_ON_RGCS_CHANNELS, DLGN_OFF_RGCS_CHANNELS, DLGN_ON_OFF_RGCS_CHANNELS, DLGN_OTHER_RGCS_CHANNELS), 
-                rgb_kernel_size=9
+                rgb_kernel_size=int(DLGN_GSW * 2 + 1)
             )   
         out_channels = dLGN_projecting_rgcs_layer.out_channels
 
@@ -155,16 +103,16 @@ class Network:
         self.layers.append(dLGN_projecting_rgcs)
 
         # Use a 1x1 conv to model dLGN relay neurons (model only the excitatory neurons)
-        out_sigma = 1
+        out_sigma = 1 # NOTE: apply stride of 1 for simplicity
         out_size = INPUT_SIZE[1] * out_sigma
         dLGN_out_channels = int(np.floor(anet.find_layer('LGNd','').num/out_sigma/INPUT_SIZE[1]/INPUT_SIZE[2]))       
         convlayer = ConvLayer(
             params=ConvParam(
                 in_channels=self.area_channels['RGCdLGN'], 
                 out_channels=dLGN_out_channels,
-                gsh=INPUT_GSH,
+                gsh=DLGN_GSH,
                 gsw=0, out_sigma=out_sigma
-            ), # gsw=0 means kernel size of 1 since RGCdLGN already account for complete receptive field size
+            ), # gsw=0 means kernel size = 1 since RGCdLGN already account for complete receptive field size
             source_name='RGCdLGN', target_name='LGNd', out_size=out_size,
         )   
         architecture.set_num_channels('LGNd', '', dLGN_out_channels)
@@ -194,6 +142,7 @@ class Network:
             in_size = in_conv_layer.out_size
             in_channels = in_conv_layer.params.out_channels
             
+            assert e[1].area != 'LGNd' and e[1].area != 'sSC' and e[1].area != 'LPn', "LGNd, sSC, and LPn are modelled with custom layers and should not have conv layers constructed for them."
             out_anat_layer = anet.find_layer(e[1].area, e[1].depth)
             
             out_sigma = get_out_sigma(e[0].area, e[0].depth, e[1].area, e[1].depth)
@@ -259,8 +208,9 @@ class Network:
                     target_area_name=target_area_name,
                     in_channels=num_source_channels, 
                     out_channels=self.area_channels[target_area_name],
-                    # @TODO ASK TRIPP, to match mousenet, I used stride since i know feature maps either 64 or 32 (note that HVAs never modulate VISp/dLGN)
-                    stride = int(1/out_sigma),
+                    # NOTE: stride ensures that the conditioning network outputs a scale/shift
+                    # parameter which matches the feature map size to modulate
+                    out_sigma=out_sigma,
                 ),
             )
             self.layers.append(sft_layer)
@@ -287,7 +237,6 @@ class Network:
         """
         draw the network structure
         """
-        # TODO: this only works for conv layers; need to add non-conv layers to drawing
         G, node_label_dict = self.make_graph()
         edge_label_dict = {(c.source_name, c.target_name):(c.params.kernel_size) for c in self.layers}
         plt.figure(figsize=(12,12))

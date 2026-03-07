@@ -88,9 +88,11 @@ def gen_anatomy(data, input_depths = ['4'],
     # and the LP is modelled with SFTLayers as pathways rather than anatomical layers
     LGNd = AnatomicalLayer('LGNd', '', data.get_num_neurons('LGNd', None))
     sSC = AnatomicalLayer('sSC', '', data.get_num_neurons('sSC', None))
+    LPn = AnatomicalLayer('LPn', '', data.get_num_neurons('LPn', None))
     anet.add_layer(LGNd)
     anet.add_layer(sSC)
-    output_map[0] = [LGNd, sSC]
+    anet.add_layer(LPn)
+    output_map[0] = [LGNd, sSC, LPn]
 
     for hierarchy in [1,2,3]:
         output_map[hierarchy] = []

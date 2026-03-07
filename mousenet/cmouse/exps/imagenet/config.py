@@ -10,21 +10,18 @@ NUM_CLASSES = 1000
 HIDDEN_LINEAR = 2048 #4096
 
 EDGE_Z = 1 #Z-score (# standard deviations) of edge of kernel
-INPUT_GSH = 1 #Gaussian height of input to LGNv 
-INPUT_GSW = 4 #Gaussian width of input to LGNv (corresponds to 9x9 kernel)
+DLGN_GSH = 1 #Gaussian height of input to LGNd 
+DLGN_GSW = 4 #Gaussian width of input to LGNd (corresponds to 9x9 kernel)
 
 #OUTPUT_AREAS = ['VISp5', 'VISl5', 'VISpor5'] # for SimpleNet VISl
 OUTPUT_AREAS = ['VISp5','VISl5', 'VISrl5', 'VISli5', 'VISpl5', 'VISal5', 'VISpor5']
 
-# TODO ASK TRIPP: also model RGCs which project to both?
+# TODO VANESSA also model RGCs which project to both?
 TOTAL_RGCS = 46000 # C57BL/6J mice have on average 46K ± 2K RBPMS+ RGCs per retina [SOURCE: https://pubmed.ncbi.nlm.nih.gov/36078097/], which matches the mouse type in https://pmc.ncbi.nlm.nih.gov/articles/PMC4982907/#sec2
 
-# TODO ASK TRIPP: 40 and 88% don't add up, but since these are separate pathways maybe this is fine?
-# but I'm technically overmodelling the number of RGCs?
 DLGN_PROJECTING_RGCS = int(TOTAL_RGCS * 0.40)  # ~40% of all RGCs project to the dLGN
 SC_PROJECTING_RGCS = int(TOTAL_RGCS * 0.88) # ~85–90% of all RGCs project to SC
 
-# TODO ASK TRIPP: HAD TO USE MATH.CEIL...which will also overmodel the number of RGCs
 # Determine number of RGCs of each type ON, OFF, ON-OFF, and other
 # Based on proportions described in https://journals.physiology.org/doi/full/10.1152/jn.00227.2016
 # 89 dLGN and 103 SC projecting RGCs are sampled to perform full characterization; the proportions of ON/OFF/ON-OFF are treated as representative of the entire RGC inputs to SC/dLGN

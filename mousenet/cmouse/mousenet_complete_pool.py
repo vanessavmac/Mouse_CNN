@@ -2,102 +2,8 @@ from copyreg import pickle
 import torch
 from torch import nn
 import networkx as nx
-import numpy as np
-import pathlib, os
-import pickle
-from .exps.imagenet.config import  INPUT_SIZE, EDGE_Z, OUTPUT_AREAS, HIDDEN_LINEAR, NUM_CLASSES
-import pdb
-from .network import ConvLayer, NonConvLayer
-
-def get_retinotopic_mask(layer, retinomap):
-    region_name = ''.join(x for x in layer.lower() if x.isalpha())
-    mask = torch.zeros(32, 32)
-    if layer == "input":
-        return
-    if region_name == "visp":
-        return 1
-
-    for area in retinomap:
-        area_name = area[0].lower()
-        if area_name == region_name:
-            normalized_polygon = area[1]
-            x, y = normalized_polygon.exterior.coords.xy
-            x, y = list(x), list(y)
-            xshift= yshift = int(0)
-            if area_name != "visp":
-                xshift = int((max(x) - min(x))/4)
-                yshift = int((max(y) - min(y))/4)
-            x1, x2 = int(max(min(x)+xshift, 0)), int(min(max(x) - xshift, 32))
-            y1, y2 = int(max(min(y) + yshift, 0)), int(min(max(y) - yshift, 32))
-            mask[x1:x2, y1:y2] = 1
-            mask_sum = mask.sum()
-            project_root = pathlib.Path(__file__).parent.parent.resolve()
-            file = os.path.join(project_root, "retinotopics", "mask_areas", f"{area_name}.pkl")
-            pickle.dump(mask_sum, open(file,"wb"))
-            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-            mask.to(device)
-            return mask
-
-    # raise ValueError(f"Could not find area for layer {layer} in retinomap")
-
-
-class Conv2dMask(nn.Conv2d):
-    """
-    Conv2d with Gaussian mask 
-    """
-    def __init__(self, in_channels, out_channels, kernel_size, gsh, gsw, mask=3, stride=1, padding=0):
-        super(Conv2dMask, self).__init__(in_channels, out_channels, kernel_size, stride=stride)
-        self.mypadding = nn.ConstantPad2d(padding, 0)
-        if gsh == 0 or gsw == 0 or mask == 0:
-            self.mask = None # special case, kernel size is 1, so no Gaussian mask applied
-        elif mask==1:
-            self.mask = nn.Parameter(torch.Tensor(self.make_gaussian_kernel_mask(gsh, gsw)))
-        elif mask ==2:
-            self.mask = nn.Parameter(torch.Tensor(self.make_gaussian_kernel_mask(gsh, gsw)), requires_grad=False) 
-        elif mask ==3:
-            self.mask = nn.Parameter(torch.Tensor(self.make_gaussian_kernel_mask_vary_channel(gsh, gsw, kernel_size, out_channels, in_channels)), requires_grad=False)
-        else:
-            assert("mask should be 0, 1, 2, 3!")
-
-    def forward(self, input):
-        if self.mask is not None:
-            return super(Conv2dMask, self)._conv_forward(self.mypadding(input), self.weight*self.mask, self.bias)
-        else:
-            return super(Conv2dMask, self)._conv_forward(self.mypadding(input), self.weight, self.bias)
-            
-    def make_gaussian_kernel_mask(self, peak, sigma):
-        """
-        :param peak: peak probability of non-zero weight (at kernel center)
-        :param sigma: standard deviation of Gaussian probability (kernel pixels)
-        :param edge_z: Z-score (# standard deviations) of edge of kernel
-        :return: mask in shape of kernel with True wherever kernel entry is non-zero
-        """
-        width = int(sigma*EDGE_Z)        
-        x = np.arange(-width, width+1)
-        X, Y = np.meshgrid(x, x)
-        radius = np.sqrt(X**2 + Y**2)
-
-        probability = peak * np.exp(-radius**2/2/sigma**2)
-
-        re = np.random.rand(len(x), len(x)) < probability
-        # plt.imshow(re, cmap='Greys')
-        return re
-    
-    def make_gaussian_kernel_mask_vary_channel(self, peak, sigma, kernel_size, out_channels, in_channels):
-        """
-        :param peak: peak probability of non-zero weight (at kernel center)
-        :param sigma: standard deviation of Gaussian probability (kernel pixels)
-        :param edge_z: Z-score (# standard deviations) of edge of kernel
-        :param kernel_size: kernel size of the conv2d 
-        :param out_channels: number of output channels of the conv2d
-        :param in_channels: number of input channels of the con2d
-        :return: mask in shape of kernel with True wherever kernel entry is non-zero
-        """
-        re = np.zeros((out_channels, in_channels, kernel_size, kernel_size))
-        for i in range(out_channels):
-            for j in range(in_channels):
-                re[i, j, :] = self.make_gaussian_kernel_mask(peak, sigma)
-        return re
+from .exps.imagenet.config import  OUTPUT_AREAS
+from .conv import Conv2dMask, ConvLayer, NonConvLayer
 
 class MouseNetCompletePool(nn.Module):
     """
@@ -167,7 +73,7 @@ class MouseNetCompletePool(nn.Module):
 
         for area in self.top_sort:
             if area == 'LP' or area == 'LPn':
-                raise Exception("LP should not be included in area_list as it's a set of pathways.")
+                raise Exception("LP should not be included in topological sort as it's a set of pathways.")
             
             if area == 'input':
                 continue
@@ -222,9 +128,8 @@ class MouseNetCompletePool(nn.Module):
                         raise ValueError(f"Source area {source_area} for LP pathway to {area} has not been calculated yet. Check the topological sort order.")
             
             if len(input_maps) > 0:
-                # TODO ASK TRIPP: is this reasonable to make feature maps same size using average pooling before modulating? this is because
-                # HVAs take disynaptic input from the SC and/or V1 (feature map of size 64); but other HVAs (specifically VISl)
-                # is only size 32, and SFT requires the input conditioning inputs to be same size to apply convolution
+                # Due to stride of 2 outbound from VISp, this makes feature maps a different size
+                # Apply pooling to ensure feature maps are same size before being fed into the conditioning network
                 print(f"\nApplying SFT modulation for {area} with input from {len(input_maps)} source areas.")
                 min_input_map_size = min([input_map.shape[2] for input_map in input_maps]) if len(input_maps) > 0 else None
                 max_input_mape_size = max([input_map.shape[2] for input_map in input_maps]) if len(input_maps) > 0 else None
@@ -234,10 +139,13 @@ class MouseNetCompletePool(nn.Module):
                     input_maps = [torch.nn.AdaptiveAvgPool2d(min_input_map_size)(input_map) if input_map.shape[2] != min_input_map_size else input_map for input_map in input_maps]
                     print(f"After pooling, input maps for SFT modulation of {area} have sizes: {[input_map.shape for input_map in input_maps]}")
 
-                # TODO ASK TRIPP, does it make sense to modulate feature maps before applying batch norm and relu? this provides greater control / affects both positive and negative values?
+                # Modulate feature maps before applying batch norm and relu
                 sft_layer = self.LP_pathways[area]
                 calc_graph[area] = sft_layer(torch.cat(input_maps, dim=1), calc_graph[area])
-                
+                print(f"{area} was modulated via SFT.")
+            else:
+                print(f"{area} does not receive modulatory inputs, skipping SFT modulation.")
+
             calc_graph[area] = nn.ReLU(inplace=True)(
                 self.BNs[area](
                     calc_graph[area]

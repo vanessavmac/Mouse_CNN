@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .exps.imagenet.config import INPUT_SIZE
 from .exps.imagenet.config import LUM_CHANNEL
+from .conv import Conv2dMask, ConvParam
 
 class MouseRetinaLayer(nn.Module):
     def __init__(self, num_rgb_dog_output_channels, rgb_kernel_size, sigma_c=5.61, sigma_s=16.98):
@@ -36,8 +37,9 @@ class MouseRetinaLayer(nn.Module):
         self.conv_off = nn.Conv2d(1, off_channels, kernel_size=1)
         self.conv_on_off = nn.Conv2d(1, on_off_channels, kernel_size=1)
 
-        # TODO ASK TRIPP: Make this a sparse Conv2d - I think ye definitely this should be INPUT_GSH and INPUT_GSW
-        self.conv_other = nn.Conv2d(3, other_channels, kernel_size=rgb_kernel_size, padding=rgb_kernel_size // 2)
+        gsw = (rgb_kernel_size - 1) // 2
+        conv_other_params = ConvParam(in_channels=3, out_channels=other_channels, gsh=1, gsw=gsw, out_sigma=1) # 3 RGB channels as input
+        self.conv_other = Conv2dMask(conv_other_params.in_channels, conv_other_params.out_channels, conv_other_params.kernel_size, conv_other_params.gsh, conv_other_params.gsw, stride=conv_other_params.stride, padding=conv_other_params.padding)
 
         self.out_channels = on_channels + off_channels + on_off_channels + other_channels
 

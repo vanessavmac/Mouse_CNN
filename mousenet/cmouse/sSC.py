@@ -1,50 +1,54 @@
 import torch
 import torch.nn as nn
+from .conv import Conv2dMask, ConvParam
+
+KERNEL_SIZES = [5, 5, 5]
+DILATIONS = [6, 7, 9]
+EFFECTIVE_RF_SIZE = [ kernel_size + (kernel_size - 1) * (dilation - 1) for kernel_size, dilation in zip(KERNEL_SIZES, DILATIONS) ]
+assert EFFECTIVE_RF_SIZE == [25, 29, 37], f"Expected effective receptive field sizes of [25, 29, 37], but got {EFFECTIVE_RF_SIZE}"
 
 class MousesSCLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=9):
+    def __init__(self, in_channels, out_channels):
         super(MousesSCLayer, self).__init__()
         """
-        The superficial SC is modelled as 3 parallel convolutions with 
-        different dilations (d=1, 2, 3) to represent wide-field cells.
+        The superficial SC is modelled as 3 parallel dilated convolutions.
+        Models the WF cells which begin in sSC and project to the LP.
 
-        NOTE: The input and output feature maps of the sSC layer are the same size, so we use a stride of 1 and appropriate padding.
-
-        Kernel size is 9 based on:
-
-            A. E. Allen, C. A. Procyk, M. Howarth, L. Walmsley, and T. M. Brown, “Visual input 
-            to the mouse lateral posterior and posterior thalamic nuclei: photoreceptive origins 
-            and retinotopic order,” The Journal of Physiology, vol. 594, no. 7, pp. 1911–1929, 
-            Apr. 2016, doi: 10.1113/JP271707.
-
-        :param in_channels: number of input channels from the retina (RGCs)
-        :param out_channels: each dilated convolution outputs out_channels // 3 channels, so total output channels is out_channels
-        :param kernel_size
+        The input and output feature maps of the sSC layer are the same size, 
+        so we use a stride of 1 and appropriate padding.
         """
         if isinstance(out_channels, float):
             assert out_channels.is_integer(), "out_channels must be an integer or a float with no decimal part"
             out_channels = int(out_channels)
 
-        # TODO ASK TRIPP: note, i made this assumption, d1/d2/d3 represent median plus/minus std of RF sizes
         # Divide output channels equally among three dilated convolutions
         out_channels_d1 = int(out_channels // 3)
         out_channels_d2 = int(out_channels // 3)
         out_channels_d3 = int(out_channels - out_channels_d1 - out_channels_d2)
-        
-        print(f"sSC initialized with in_channels: {in_channels}, out_channels: {out_channels} "
-              f"(dilation 1: {out_channels_d1}, dilation 2: {out_channels_d2}, dilation 3: {out_channels_d3}), "
-              f"kernel_size: {kernel_size}")
-        
-        # TODO ASK TRIPP: Should I make this sparse Conv2d? Dilated convs model model varying receptive fields of wide-field cells
-        # which take inputs from RGCs and project to the LP. Similar to dLGN, should I use hard coded values?
-        # (hard coded values based on kernel size of 9)
-        # INPUT_GSH = 1 #Gaussian height of input to LGNv 
-        # INPUT_GSW = 4 #Gaussian width of input to LGNv
-        # ACTUALLY YES DO THIS
-        self.conv_d1 = nn.Conv2d(in_channels, out_channels_d1, kernel_size=kernel_size, padding=kernel_size//2, dilation=1)
-        self.conv_d2 = nn.Conv2d(in_channels, out_channels_d2, kernel_size=kernel_size, padding=kernel_size//2*2, dilation=2)
-        self.conv_d3 = nn.Conv2d(in_channels, out_channels_d3, kernel_size=kernel_size, padding=kernel_size//2*3, dilation=3)
 
+        # Rearrange so largest number of out_channels is assigned to out_channels_d2 (this is the median RF size)
+        max_out_channels = max(out_channels_d1, out_channels_d2, out_channels_d3)
+        if out_channels_d1 == max_out_channels:
+            out_channels_d1, out_channels_d2, out_channels_d3 = out_channels_d2, out_channels_d1, out_channels_d3
+        elif out_channels_d3 == max_out_channels:
+            out_channels_d1, out_channels_d2, out_channels_d3 = out_channels_d1, out_channels_d3, out_channels_d2
+
+        print(f"sSC initialized with in_channels: {in_channels}, out_channels: {out_channels}")
+        
+        gsw = (KERNEL_SIZES[0] - 1) // 2
+        conv_d1_params = ConvParam(in_channels=in_channels, out_channels=out_channels_d1, gsh=1, gsw=gsw, out_sigma=1, dilation=DILATIONS[0])
+        self.conv_d1 = Conv2dMask(conv_d1_params.in_channels, conv_d1_params.out_channels, conv_d1_params.kernel_size, conv_d1_params.gsh, conv_d1_params.gsw, stride=conv_d1_params.stride, padding=conv_d1_params.padding, dilation=DILATIONS[0])
+        print(f"sSC conv_d1 (effective RD size = {EFFECTIVE_RF_SIZE[0]}): initialized with out_channels: {out_channels_d1}, kernel_size: {conv_d1_params.kernel_size}, dilation: {DILATIONS[0]}")
+
+        gsw = (KERNEL_SIZES[1] - 1) // 2
+        conv_d2_params = ConvParam(in_channels=in_channels, out_channels=out_channels_d2, gsh=1, gsw=gsw, out_sigma=1, dilation=DILATIONS[1])
+        self.conv_d2 = Conv2dMask(conv_d2_params.in_channels, conv_d2_params.out_channels, conv_d2_params.kernel_size, conv_d2_params.gsh, conv_d2_params.gsw, stride=conv_d2_params.stride, padding=conv_d2_params.padding, dilation=DILATIONS[1])
+        print(f"sSC conv_d2 (effective RD size = {EFFECTIVE_RF_SIZE[1]}): initialized with out_channels: {out_channels_d2}, kernel_size: {conv_d2_params.kernel_size}, dilation: {DILATIONS[1]}")
+        
+        gsw = (KERNEL_SIZES[2] - 1) // 2
+        conv_d3_params = ConvParam(in_channels=in_channels, out_channels=out_channels_d3, gsh=1, gsw=gsw, out_sigma=1, dilation=DILATIONS[2])
+        self.conv_d3 = Conv2dMask(conv_d3_params.in_channels, conv_d3_params.out_channels, conv_d3_params.kernel_size, conv_d3_params.gsh, conv_d3_params.gsw, stride=conv_d3_params.stride, padding=conv_d3_params.padding, dilation=DILATIONS[2])
+        print(f"sSC conv_d3 (effective RD size = {EFFECTIVE_RF_SIZE[2]}): initialized with out_channels: {out_channels_d3}, kernel_size: {conv_d3_params.kernel_size}, dilation: {DILATIONS[2]}")
 
 
     def forward(self, x):
