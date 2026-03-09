@@ -63,7 +63,7 @@ class SFTLayer(nn.Module):
 
 
     def forward(self, cond, x):
-        print(f"SFTLayer targetting {self.name}: Conditioning input has dimension {cond.shape}, feature map input has dimension {x.shape}")
+        # print(f"SFTLayer targetting {self.name}: Conditioning input has dimension {cond.shape}, feature map input has dimension {x.shape}")
         
         scale = self.scale_conv(cond)
         bias = self.bias_conv(cond)

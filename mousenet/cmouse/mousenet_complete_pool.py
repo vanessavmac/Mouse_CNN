@@ -120,7 +120,7 @@ class MouseNetCompletePool(nn.Module):
             input_maps = []
             if area in self.LP_pathways_sources.keys():
                 source_areas = self.LP_pathways_sources[area]
-                print(f"{area} receives LP input from {source_areas}")
+                # print(f"{area} receives LP input from {source_areas}")
                 for source_area in source_areas:
                     if source_area in calc_graph:
                         input_maps.append(calc_graph[source_area])
@@ -130,21 +130,22 @@ class MouseNetCompletePool(nn.Module):
             if len(input_maps) > 0:
                 # Due to stride of 2 outbound from VISp, this makes feature maps a different size
                 # Apply pooling to ensure feature maps are same size before being fed into the conditioning network
-                print(f"\nApplying SFT modulation for {area} with input from {len(input_maps)} source areas.")
+                # print(f"\nApplying SFT modulation for {area} with input from {len(input_maps)} source areas.")
                 min_input_map_size = min([input_map.shape[2] for input_map in input_maps]) if len(input_maps) > 0 else None
                 max_input_mape_size = max([input_map.shape[2] for input_map in input_maps]) if len(input_maps) > 0 else None
 
                 if min_input_map_size != max_input_mape_size:
-                    print(f"Input maps for SFT modulation of {area} have different spatial sizes. Applying adaptive average pooling to match the smallest size {min_input_map_size}.")
+                    # print(f"Input maps for SFT modulation of {area} have different spatial sizes. Applying adaptive average pooling to match the smallest size {min_input_map_size}.")
                     input_maps = [torch.nn.AdaptiveAvgPool2d(min_input_map_size)(input_map) if input_map.shape[2] != min_input_map_size else input_map for input_map in input_maps]
-                    print(f"After pooling, input maps for SFT modulation of {area} have sizes: {[input_map.shape for input_map in input_maps]}")
+                    # print(f"After pooling, input maps for SFT modulation of {area} have sizes: {[input_map.shape for input_map in input_maps]}")
 
                 # Modulate feature maps before applying batch norm and relu
                 sft_layer = self.LP_pathways[area]
                 calc_graph[area] = sft_layer(torch.cat(input_maps, dim=1), calc_graph[area])
-                print(f"{area} was modulated via SFT.")
+                # print(f"{area} was modulated via SFT.")
             else:
-                print(f"{area} does not receive modulatory inputs, skipping SFT modulation.")
+                # print(f"{area} does not receive modulatory inputs, skipping SFT modulation.")
+                pass
 
             calc_graph[area] = nn.ReLU(inplace=True)(
                 self.BNs[area](
