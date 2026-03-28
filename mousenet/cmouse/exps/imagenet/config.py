@@ -10,8 +10,9 @@ NUM_CLASSES = 1000
 HIDDEN_LINEAR = 2048 #4096
 
 EDGE_Z = 1 #Z-score (# standard deviations) of edge of kernel
-DLGN_GSH = 1 #Gaussian height of input to LGNd 
+GSH_1 = 1 #Gaussian height of input to LGNd 
 DLGN_GSW = 4 #Gaussian width of input to LGNd (corresponds to 9x9 kernel)
+SSC_GSW = 5 #Gaussian width of input to sSC (corresponds to 11x11 kernel)
 
 #OUTPUT_AREAS = ['VISp5', 'VISl5', 'VISpor5'] # for SimpleNet VISl
 OUTPUT_AREAS = ['VISp5','VISl5', 'VISrl5', 'VISli5', 'VISpl5', 'VISal5', 'VISpor5']
@@ -53,3 +54,75 @@ def get_out_sigma(source_area, source_depth, target_area, target_depth):
             if source_area == 'VISp':
                 return 1/2    
     return 1
+
+
+# [20] A. E. Allen, C. A. Procyk, M. Howarth, L. Walmsley, and T. M. Brown, “Visual 
+# input to the mouse lateral posterior and posterior thalamic nuclei: photoreceptive 
+# origins and retinotopic order,” The Journal of Physiology, vol. 594, no. 7, pp. 
+# 1911–1929, Apr. 2016, doi: 10.1113/JP271707.
+LP_RF_SIZE = 17
+
+# LP modulates HVAs which all have feature maps of size 32x32
+LP_OUTPUT_SIZE = 32
+
+# Modulatory pathways modelled (to layer 4 targets, consistent with feedforward and 
+# data from [24] N. Zhou, S. P. Masterson, J. K. Damron, W. Guido, and M. E. Bickford, 
+# “The Mouse Pulvinar Nucleus Links the Lateral Extrastriate Cortex, Striatum, and Amygdala.,” 
+# J Neurosci, vol. 38, no. 2, pp. 347–362, Jan. 2018, doi: 10.1523/JNEUROSCI.1279-17.2017.)
+
+# SC --> LP --> All HVAs
+# VISl5 --> LP --> VISrl, VISal
+# VISp5 --> LP --> VISl, VISal, VISrl
+LP_PATHWAYS = [
+    {
+        'sources': [('sSC', None), ('VISp', '5')],
+        'target': ('VISl', '4'),
+    },
+    {
+        'sources': [('sSC', None), ('VISl', '5'), ('VISp', '5')],
+        'target': ('VISrl', '4'),
+    },
+    {
+        'sources': [('sSC', None), ('VISl', '5'), ('VISp', '5')],
+        'target': ('VISal', '4'),
+    },
+    {
+        'sources': [('sSC', None)],
+        'target': ('VISli', '4'),
+    },
+    {
+        'sources': [('sSC', None)],
+        'target': ('VISpl', '4'),
+    },
+    {
+        'sources': [('sSC', None)],
+        'target': ('VISpor', '4'),
+    },
+]
+
+def get_lp_pathways_description(target_name):
+    return [pathway for pathway in LP_PATHWAYS if pathway['target'][0] + pathway['target'][1] == target_name]
+
+def get_unique_lp_sources():
+    unique_sources = set()
+    for pathway in LP_PATHWAYS:
+        for source_area, source_depth in pathway['sources']:
+            unique_sources.add(source_area + (source_depth if source_depth is not None else ''))
+
+    return unique_sources
+
+def get_lp_target_areas():
+    all_lp_targets = [pathway['target'][0] + pathway['target'][1] for pathway in LP_PATHWAYS]
+    assert len(set(all_lp_targets)) == len(LP_PATHWAYS), f"Expected all LP targets to be unique, but got duplicate targets in {all_lp_targets}"
+
+    return all_lp_targets
+
+def get_targets_of_source(source_name):
+    target_areas = []
+    for pathway in LP_PATHWAYS:
+        for source_area, source_depth in pathway['sources']:
+            if source_area + (source_depth if source_depth is not None else '') == source_name:
+                target_areas.append(pathway['target'][0] + pathway['target'][1])
+    assert len(set(target_areas)) == len(target_areas), f"Expected each source to have unique targets, but got duplicate targets for source {source_name} in {target_areas}"
+
+    return target_areas

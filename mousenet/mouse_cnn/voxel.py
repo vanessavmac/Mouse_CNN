@@ -123,7 +123,7 @@ class Target():
         data = Data()
         for area in data.get_areas():
             if data.get_hierarchical_level(area) < data.get_hierarchical_level(self.target_area):
-                if 'LGN' not in area and 'sSC' not in area: #TODO: handle LGN->VISp as special case
+                if 'LGN' not in area and 'sSC' not in area and 'LP' not in area: #TODO: handle LGN, sSC, and LP sources separately
                     for layer in data.get_layers():
                         self.source_names.append(area + layer)
 

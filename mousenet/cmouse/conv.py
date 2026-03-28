@@ -54,14 +54,27 @@ class ConvLayer:
         self.target_name = target_name
         self.out_size = out_size
 
-class NonConvParam:
+class LPConvInputMultipleTargets:
+    def __init__(self, source_name, target_names, params, out_size):
+        """
+        :param params: ConvParam containing the parameters of the layer
+        :param source_name: name of the source area
+        :param target_names: list of names of the target areas
+        :param out_size: output size of the layer
+        """
+        self.params = params
+        self.source_name = source_name  
+        self.target_names = target_names
+        self.out_size = out_size
+
+class CustomConvParam:
     def __init__(self, out_channels):
         self.out_channels = out_channels
 
-class NonConvLayer:
+class CustomConvLayer:
     def __init__(self, params, source_name, target_name, layer, out_size):
         """
-        :param params: NonConvParam containing the parameters of the layer
+        :param params: CustomConvParam containing the parameters of the layer
         :param layer: layer object (make sure this is a torch layer nn.Module) that can be called in forward pass
         """
         self.params = params
@@ -70,6 +83,17 @@ class NonConvLayer:
         self.target_name = target_name
         self.out_size = out_size
 
+class LPCustomConvInputMultipleTargets:
+    def __init__(self, params, source_name, target_names, layer, out_size):
+        """
+        :param params: CustomConvParam containing the parameters of the layer
+        :param layer: layer object (make sure this is a torch layer nn.Module) that can be called in forward pass
+        """
+        self.params = params
+        self.layer = layer
+        self.source_name = source_name
+        self.target_names = target_names
+        self.out_size = out_size
 
 def get_retinotopic_mask(layer, retinomap):
     region_name = ''.join(x for x in layer.lower() if x.isalpha())

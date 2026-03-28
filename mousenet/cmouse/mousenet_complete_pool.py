@@ -2,8 +2,8 @@ from copyreg import pickle
 import torch
 from torch import nn
 import networkx as nx
-from .exps.imagenet.config import  OUTPUT_AREAS
-from .conv import Conv2dMask, ConvLayer, NonConvLayer
+from .exps.imagenet.config import  OUTPUT_AREAS, get_lp_pathways_description, get_unique_lp_sources
+from .conv import Conv2dMask, ConvLayer, CustomConvLayer, LPConvInputMultipleTargets, LPCustomConvInputMultipleTargets
 
 class MouseNetCompletePool(nn.Module):
     """
@@ -12,54 +12,90 @@ class MouseNetCompletePool(nn.Module):
     def __init__(self, network, mask=3, retinomap=None):
         super(MouseNetCompletePool, self).__init__()
         self.Convs = nn.ModuleDict()
+        # NOTE: No batch norm applied to the generated gamma/beta values, since they are just raw outputs of the SFT generator layers          
         self.BNs = nn.ModuleDict()
+        # keys are source areas that project to the LP, values are the convolutional 
+        # layers that process the input from that source area before it is sent to the LP
+        self.LP_input_layers = nn.ModuleDict()
         self.Retina = nn.ModuleDict()
-        self.LP_pathways = nn.ModuleDict()
         self.network = network
         self.retinomap = retinomap
         
-        self.LP_pathways_sources = {} # keys: targets, values: list of sources
-
         G, _ = network.make_graph()
         self.top_sort = list(nx.topological_sort(G))
 
         for layer in network.layers:
-            if layer.__class__.__name__ == ConvLayer.__name__:
-                params = layer.params
-                self.Convs[layer.source_name + layer.target_name] = Conv2dMask(params.in_channels, params.out_channels, params.kernel_size,
+            params = layer.params
+
+            if layer.__class__.__name__ == ConvLayer.__name__:                
+                layer_name = layer.source_name + layer.target_name         
+                assert layer_name not in self.Convs, f"Layer {layer_name} already exists in Convs, but each layer should only be added once. Check network initialization for duplicate layers with name {layer_name}."
+
+                self.Convs[layer_name] = Conv2dMask(params.in_channels, params.out_channels, params.kernel_size,
                                                         params.gsh, params.gsw, stride=params.stride, mask=mask, padding=params.padding)
                 ## plotting Gaussian mask
                 #plt.title('%s_%s_%sx%s'%(e[0].replace('/',''), e[1].replace('/',''), params.kernel_size, params.kernel_size))
                 #plt.savefig('%s_%s'%(e[0].replace('/',''), e[1].replace('/','')))
-                if layer.target_name not in self.BNs:
-                    self.BNs[layer.target_name] = nn.BatchNorm2d(params.out_channels)
-            elif layer.__class__.__name__ == NonConvLayer.__name__:
-                params = layer.params
-                if layer.target_name == "RGCdLGN" or layer.target_name == "RGCsSC":
-                    assert layer.layer.__class__.__name__ == "MouseRetinaLayer", "The only NonConvLayer that can target RGCdLGN or RGCsSC is the retina, but getting %s"%(layer.layer.__class__.__name__)
-                    self.Retina[layer.source_name + layer.target_name] = layer.layer
-                    
-                    if layer.target_name not in self.BNs:
-                        self.BNs[layer.target_name] = nn.BatchNorm2d(params.out_channels)
-                elif layer.target_name == "sSC":
-                    # NOTE technically, the sSC are conv layers but handle it as NonConv since it's a custom module with parallel convolutions
-                    assert layer.layer.__class__.__name__ == "MousesSCLayer", "The only NonConvLayer that can target sSC is the sSC layer, but getting %s"%(layer.layer.__class__.__name__)
-                    self.Retina[layer.source_name + layer.target_name] = layer.layer
-                    
-                    if layer.target_name not in self.BNs:
-                        self.BNs[layer.target_name] = nn.BatchNorm2d(params.out_channels)
-                else:
-                    assert layer.layer.__class__.__name__ == "SFTLayer", "Any NonConvLayer that is not the retina must be an SFTLayer representing an LP pathway, but getting %s"%(layer.layer.__class__.__name__)
-                    assert type(layer.source_name) == list, "The SFTLayer's source name must be a list"
-                    assert layer.target_name not in self.LP_pathways, "Each target area can only have one LP pathway"
-                    assert layer.target_name not in self.LP_pathways_sources, "Each target area can only have one LP pathway"
-                    
-                    self.LP_pathways[layer.target_name] = layer.layer
-                    self.LP_pathways_sources[layer.target_name] = layer.source_name
 
-                    # NOTE: self.BNs is not updated SFTLayer only modulate existing ConvLayers and NonConvLayers
+                # NOTE: this will skip creating a batch norm after the 1x1 convs (gamma and beta are just raw outputs of the SFT generator layers
+                if layer.target_name not in self.BNs:
+                    if "SFT_gamma_" in layer.target_name or "SFT_beta_" in layer.target_name:
+                        pass
+                    else:
+                        self.BNs[layer.target_name] = nn.BatchNorm2d(params.out_channels)
+
+            elif layer.__class__.__name__ == CustomConvLayer.__name__:
+                assert layer.target_name == "RGCdLGN" or layer.target_name == "RGCsSC", f"CustomConvLayer with target {layer.target_name} and source {layer.source_name} is not supported."
+
+                assert layer.layer.__class__.__name__ == "MouseRetinaLayer", "The only CustomConvLayer that can target RGCdLGN or RGCsSC is the retina, but getting %s"%(layer.layer.__class__.__name__)
+                layer_name = layer.source_name + layer.target_name
+                self.Retina[layer_name] = layer.layer
+
+                assert layer.target_name not in self.BNs, f"Batch norm for area {layer.target_name} already exists in BNs."
+                self.BNs[layer.target_name] = nn.BatchNorm2d(params.out_channels)
+
+            elif layer.__class__.__name__ == LPConvInputMultipleTargets.__name__:
+                assert all('LP_' in target_name for target_name in layer.target_names), "All target names for LPCustomConvInputMultipleTargets should contain 'LP_' since they are all targeting the LP, but got target names %s"%(layer.target_names)
+
+                conv_layer = Conv2dMask(params.in_channels, params.out_channels, params.kernel_size,
+                                                        params.gsh, params.gsw, stride=params.stride, mask=mask, padding=params.padding)
+                
+                layer_name = layer.source_name
+                assert layer_name not in self.LP_input_layers, f"Layer {layer_name} already exists in LP_inputs, but each layer should only be added once. Check network initialization for duplicate layers with name {layer_name}."
+                self.LP_input_layers[layer_name] = conv_layer
+
+                # NOTE: no batch norm is created here; we create a separate batch norm for each LP pathway below
+
+            elif layer.__class__.__name__ == LPCustomConvInputMultipleTargets.__name__:
+                assert layer.layer.__class__.__name__ == "WideFieldCells" and layer.source_name == "sSC", "The only CustomConvLayer that can target the LP from sSC is the WideFieldCells, but getting %s and source_name %s"%(layer.layer.__class__.__name__, layer.source_name)
+                assert all('LP_' in target_name for target_name in layer.target_names), "All target names for LPCustomConvInputMultipleTargets should contain 'LP_' since they are all targeting the LP, but got target names %s"%(layer.target_names)
+
+                layer_name = layer.source_name
+                assert layer_name not in self.LP_input_layers, f"Layer {layer_name} already exists in LP_inputs, but each layer should only be added once. Check network initialization for duplicate layers with name {layer_name}."
+                self.LP_input_layers[layer_name] = layer.layer
+
+                # NOTE: no batch norm is created here; we create a separate batch norm for each LP pathway below
+                
             else:
-                raise ValueError(f"Layer {layer} is not ConvLayer or NonConvLayer, cannot be added to model.")
+                raise ValueError(f"Layer {layer} is not ConvLayer or CustomConvLayer, cannot be added to model.")
+        
+        # For each LP target_area (which corresponds to a unique LP pathway), create a batch norm layer that acts on the summed source inputs
+        lp_out_channels = None
+        for area in network.area_channels:
+            if 'LP_' in area:
+                if lp_out_channels is not None:
+                    assert lp_out_channels == network.area_channels[area], f"Expected all LP pathways to have the same number of output channels. Check network initialization and area_channels for areas with 'LP' in their name."
+                else:
+                    lp_out_channels = network.area_channels[area]
+
+                assert area not in self.BNs
+                self.BNs[area] = nn.BatchNorm2d(lp_out_channels) # batch norm for the summed inputs to the LP
+
+        assert len(self.LP_input_layers) == len(get_unique_lp_sources()) and self.LP_input_layers.keys() == set(get_unique_lp_sources()), "Expected 3 unique sources that project to the LP, but got %d. Check get_unique_lp_sources function and network initialization."%len(self.LP_input_layers)
+
+        assert all("SFT" not in bn_key for bn_key in self.BNs.keys()), "Expected no SFT modulation batch norms to be created in BNs."
+
+
 
     def get_img_feature(self, x, area_list, flatten=False):
         """
@@ -72,15 +108,12 @@ class MouseNetCompletePool(nn.Module):
         calc_graph = {}
 
         for area in self.top_sort:
-            if area == 'LP' or area == 'LPn':
-                raise Exception("LP should not be included in topological sort as it's a set of pathways.")
-            
             if area == 'input':
                 continue
             
             # RGC projections to the LGN and SC
             if area == 'RGCdLGN' or area == 'RGCsSC':
-                layer = self.network.find_layer_by_source_target('input', area, layer_type=NonConvLayer.__name__)
+                layer = self.network.find_layer_by_source_target('input', area, layer_type=CustomConvLayer.__name__)
                 layer_name = layer.source_name + layer.target_name
                 if area in calc_graph:
                     raise ValueError(f"Area {area} already exists in calc_graph, but this pathway only has 1 possible input.")
@@ -98,16 +131,34 @@ class MouseNetCompletePool(nn.Module):
             
             # Extrageniculate Pathway
             if area == 'sSC':
-                layer = self.network.find_layer_by_source_target('RGCsSC', area, layer_type=NonConvLayer.__name__)
+                layer = self.network.find_layer_by_source_target('RGCsSC', area, layer_type=ConvLayer.__name__)
                 layer_name = layer.source_name + layer.target_name
-                if area in calc_graph:
-                    raise ValueError(f"Area {area} already exists in calc_graph, but this pathway only has 1 possible input.")
-                calc_graph[area] =  nn.ReLU(inplace=True)(self.BNs[area](self.Retina[layer_name](calc_graph[layer.source_name])))
+                calc_graph[area] =  self.Convs[layer_name](calc_graph[layer.source_name]) # NOTE: BN and ReLU applied after modulation
+
+                # NOTE: no batch norm applied to the generated gamma/beta values, since they are just raw outputs of the SFT generator layers
+                # NOTE: VISp5 is the only source that modulates sSC, hardcoded the name      
+                gamma = self.Convs['VISp5SFT_gamma_sSC'](calc_graph["VISp5"])
+                beta = self.Convs['VISp5SFT_beta_sSC'](calc_graph["VISp5"])
+
+                calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](gamma * calc_graph[area] + beta))
+
+                continue
+            
+            if "SFT_gamma_" in area or "SFT_beta_" in area:
+                modulatory_target_area = area.split('_')[-1]
+                if modulatory_target_area != "sSC":
+                    calc_graph[area] = self.Convs[f"LP_{modulatory_target_area}{area}"](calc_graph[f"LP_{modulatory_target_area}"])
+                    # NOTE: no batch norm applied to the generated gamma/beta values, since they are just raw outputs of the SFT generator layers
+                else:
+                    pass # We handle sSC and it's modulation in the if-block above "if area == 'sSC'"
                 continue
 
-            # V1/HVAs
+            # V1/HVAs and inputs to the LP
+            found_layer_for_area = False
             for layer in self.network.layers:
-                if layer.target_name == area and layer.__class__.__name__ == ConvLayer.__name__:
+                if layer.__class__.__name__ == ConvLayer.__name__ and layer.target_name == area:
+                    assert "LP_" not in area, f"Expected area {area} to not contain 'LP_' since it's a target of a ConvLayer, but got {area}"
+
                     layer_name = layer.source_name + layer.target_name
                     if area not in calc_graph:
                         calc_graph[area] = self.Convs[layer_name](
@@ -115,38 +166,38 @@ class MouseNetCompletePool(nn.Module):
                             )
                     else:
                         calc_graph[area] = calc_graph[area] + self.Convs[layer_name](calc_graph[layer.source_name])
+                    
+                    found_layer_for_area = True
 
-            # LP pathways 
-            input_maps = []
-            if area in self.LP_pathways_sources.keys():
-                source_areas = self.LP_pathways_sources[area]
-                # print(f"{area} receives LP input from {source_areas}")
-                for source_area in source_areas:
-                    if source_area in calc_graph:
-                        input_maps.append(calc_graph[source_area])
+                elif (layer.__class__.__name__ == LPConvInputMultipleTargets.__name__ or layer.__class__.__name__ == LPCustomConvInputMultipleTargets.__name__) and area in layer.target_names:
+                    assert "LP_" in area, f"Expected area {area} to contain 'LP_' since it's a target of an LPConvInputMultipleTargets or LPCustomConvInputMultipleTargets layer."
+
+                    if area not in calc_graph:
+                        calc_graph[area] = self.LP_input_layers[layer.source_name](calc_graph[layer.source_name])
                     else:
-                        raise ValueError(f"Source area {source_area} for LP pathway to {area} has not been calculated yet. Check the topological sort order.")
+                        calc_graph[area] = calc_graph[area] + self.LP_input_layers[layer.source_name](calc_graph[layer.source_name])
+
+                    found_layer_for_area = True
             
-            if len(input_maps) > 0:
-                # Due to stride of 2 outbound from VISp, this makes feature maps a different size
-                # Apply pooling to ensure feature maps are same size before being fed into the conditioning network
-                # print(f"\nApplying SFT modulation for {area} with input from {len(input_maps)} source areas.")
-                min_input_map_size = min([input_map.shape[2] for input_map in input_maps]) if len(input_maps) > 0 else None
-                max_input_mape_size = max([input_map.shape[2] for input_map in input_maps]) if len(input_maps) > 0 else None
-
-                if min_input_map_size != max_input_mape_size:
-                    # print(f"Input maps for SFT modulation of {area} have different spatial sizes. Applying adaptive average pooling to match the smallest size {min_input_map_size}.")
-                    input_maps = [torch.nn.AdaptiveAvgPool2d(min_input_map_size)(input_map) if input_map.shape[2] != min_input_map_size else input_map for input_map in input_maps]
-                    # print(f"After pooling, input maps for SFT modulation of {area} have sizes: {[input_map.shape for input_map in input_maps]}")
-
-                # Modulate feature maps before applying batch norm and relu
-                sft_layer = self.LP_pathways[area]
-                calc_graph[area] = sft_layer(torch.cat(input_maps, dim=1), calc_graph[area])
-                # print(f"{area} was modulated via SFT.")
+            if not found_layer_for_area:
+                raise ValueError(f"Did not find any layer in the network that targets area {area}, but expected to find at least one based on the topological sort of the graph. Check network initialization to ensure that all areas have at least one incoming layer, and check the forward pass to ensure that all layers are being iterated through correctly.")
+            
+            # Perform modulation if required
+            lp_pathway_description = get_lp_pathways_description(area)
+            
+            if len(lp_pathway_description) == 0:
+                pass # print(f"{area} does not receive input from the LP, skipping modulation.")
             else:
-                # print(f"{area} does not receive modulatory inputs, skipping SFT modulation.")
-                pass
+                assert len(lp_pathway_description) == 1, f"Expected exactly one LP pathway description for area {area}, but got {len(lp_pathway_description)}. Check get_lp_pathways_description function."
 
+                lp_pathway_description = lp_pathway_description[0]
+
+                gamma = calc_graph[f"SFT_gamma_{area.split('_')[-1]}"]
+                beta = calc_graph[f"SFT_beta_{area.split('_')[-1]}"]
+
+                calc_graph[area] = gamma * calc_graph[area] + beta
+
+            # Apply batch norm and relu after modulation (if applicable) or after summing inputs (if no modulation)
             calc_graph[area] = nn.ReLU(inplace=True)(
                 self.BNs[area](
                     calc_graph[area]
