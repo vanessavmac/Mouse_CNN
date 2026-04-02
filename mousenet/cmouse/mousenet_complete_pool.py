@@ -151,7 +151,7 @@ class MouseNetCompletePool(nn.Module):
             # nn.Linear(HIDDEN_LINEAR, NUM_CLASSES),
         # )
 
-    def get_img_feature(self, x, area_list, flatten=False):
+    def get_img_feature(self, x, area_list, flatten=False, no_pooling=False):
         """
         function for get activations from a list of layers for input x
         :param x: input image set Tensor with size (num_img, INPUT_SIZE[0], INPUT_SIZE[1], INPUT_SIZE[2])
@@ -190,12 +190,19 @@ class MouseNetCompletePool(nn.Module):
             # if calc_graph[area].sum() == 0:
             #     pdb.set_trace()
         
+        if len(area_list) == 0:
+            area_list = self.top_sort[1:] # if no area specified, return all areas except input
+
         if len(area_list) == 1:
             if flatten:
                 return torch.flatten(calc_graph['%s'%(area_list[0])], 1)
             else:
                 return calc_graph['%s'%(area_list[0])]
-
+        elif no_pooling:
+            re = {}
+            for area in area_list:
+                re[area] = calc_graph[area]
+            return re
         else:
             re = None
             for area in area_list:
