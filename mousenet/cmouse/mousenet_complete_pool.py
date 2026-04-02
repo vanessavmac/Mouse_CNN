@@ -97,7 +97,7 @@ class MouseNetCompletePool(nn.Module):
 
 
 
-    def get_img_feature(self, x, area_list, flatten=False):
+    def get_img_feature(self, x, area_list, flatten=False, return_gamma_beta=False, turn_on_modulation=True, no_pooling=False):
         """
         function for get activations from a list of layers for input x
         :param x: input image set Tensor with size (num_img, INPUT_SIZE[0], INPUT_SIZE[1], INPUT_SIZE[2])
@@ -106,6 +106,8 @@ class MouseNetCompletePool(nn.Module):
                  if list length is >1, return concatenated flattened activation of the areas.
         """
         calc_graph = {}
+        gamma_calc_graph = {}
+        beta_calc_graph = {}
 
         for area in self.top_sort:
             if area == 'input':
@@ -140,7 +142,13 @@ class MouseNetCompletePool(nn.Module):
                 gamma = self.Convs['VISp5SFT_gamma_sSC'](calc_graph["VISp5"])
                 beta = self.Convs['VISp5SFT_beta_sSC'](calc_graph["VISp5"])
 
-                calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](gamma * calc_graph[area] + beta))
+                gamma_calc_graph[area] = gamma
+                beta_calc_graph[area] = beta
+
+                if turn_on_modulation:
+                    calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](gamma * calc_graph[area] + beta))
+                else:
+                    calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](calc_graph[area]))
 
                 continue
             
@@ -195,7 +203,13 @@ class MouseNetCompletePool(nn.Module):
                 gamma = calc_graph[f"SFT_gamma_{area.split('_')[-1]}"]
                 beta = calc_graph[f"SFT_beta_{area.split('_')[-1]}"]
 
-                calc_graph[area] = gamma * calc_graph[area] + beta
+                gamma_calc_graph[area] = gamma
+                beta_calc_graph[area] = beta
+
+                if turn_on_modulation:
+                    calc_graph[area] = gamma * calc_graph[area] + beta
+                else:
+                    pass
 
             # Apply batch norm and relu after modulation (if applicable) or after summing inputs (if no modulation)
             calc_graph[area] = nn.ReLU(inplace=True)(
@@ -206,12 +220,25 @@ class MouseNetCompletePool(nn.Module):
             # if calc_graph[area].sum() == 0:
             #     pdb.set_trace()
         
-        if len(area_list) == 1:
-            if flatten:
-                return torch.flatten(calc_graph['%s'%(area_list[0])], 1)
-            else:
-                return calc_graph['%s'%(area_list[0])]
+        if len(area_list) == 0:
+            area_list = calc_graph.keys()
 
+        if len(area_list) == 1:
+            area = area_list[0]
+            result = torch.flatten(calc_graph[area], 1) if flatten else calc_graph[area]
+            if return_gamma_beta:
+                return result, gamma_calc_graph, beta_calc_graph
+            else:
+                return result
+        elif no_pooling:
+            re = {}
+            for area in area_list:
+                re[area] = calc_graph[area]
+            
+            if return_gamma_beta:
+                return re, gamma_calc_graph, beta_calc_graph
+            else:
+                return re
         else:
             re = None
             for area in area_list:
@@ -234,6 +261,10 @@ class MouseNetCompletePool(nn.Module):
                 #         re = torch.cat([torch.flatten(calc_graph[area], 1), re], axis=1)
                 #     else:
                 #         re = torch.flatten(calc_graph[area], 1)
+        
+        if return_gamma_beta:
+            return re, gamma_calc_graph, beta_calc_graph
+        
         return re
 
     def forward(self, x):
