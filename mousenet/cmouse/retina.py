@@ -73,7 +73,7 @@ class MouseRetinaLayer(nn.Module):
         pure_off = F.relu(-raw_dog)
         
         # Learnable ON-OFF Mixing (Per-pixel)
-        mixed_input = torch.cat([pure_on, pure_off], dim=1)
+        mixed_input = torch.cat([raw_dog, -raw_dog], dim=1)  # both polarities, unclipped
         mix_on_off = F.relu(torch.sum(mixed_input * self.pixel_mix_weights, dim=1, keepdim=True))
         
         # Proportional RGC outputs to SC/LP
