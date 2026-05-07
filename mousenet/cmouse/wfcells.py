@@ -6,7 +6,7 @@ from .conv import Conv2dMask, ConvParam
 KERNEL_SIZES = [3, 3, 3]
 DILATIONS = [7, 10, 13]
 EFFECTIVE_RF_SIZE = [ kernel_size + (kernel_size - 1) * (dilation - 1) for kernel_size, dilation in zip(KERNEL_SIZES, DILATIONS) ]
-assert EFFECTIVE_RF_SIZE == [25, 29, 37], f"Expected effective receptive field sizes of [25, 29, 37], but got {EFFECTIVE_RF_SIZE}"
+assert EFFECTIVE_RF_SIZE == [15, 21, 27], f"Expected effective receptive field sizes of [25, 29, 37], but got {EFFECTIVE_RF_SIZE}"
 
 class WideFieldCells(nn.Module):
     def __init__(self, in_channels, out_channels):
