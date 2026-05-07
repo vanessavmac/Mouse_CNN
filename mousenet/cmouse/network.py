@@ -221,7 +221,8 @@ class Network:
                         in_channels=self.area_channels[source], 
                         out_channels=lp_out_channels,
                         gsh=GSH_1,
-                        gsw=(LP_RF_SIZE - 1) // 2, out_sigma=1/2 if "VISp" in source else 1
+                        gsw=0, # LP_RF_SIZE - 1) // 2, # NOTE: set gsw to 0 to prevent further reduction in RF size
+                        out_sigma=1/2 if "VISp" in source else 1
                     ), 
                     source_name=source, target_names=target_names, out_size=LP_OUTPUT_SIZE
                 )
@@ -277,7 +278,7 @@ class Network:
                 in_channels=self.area_channels['VISp5'], 
                 out_channels=self.area_channels['sSC'],
                 gsh=GSH_1,
-                gsw=SSC_GSW, # NOTE: comes from slide 22 in 499 presentation
+                gsw=0, # SSC_GSW, # NOTE: comes from slide 22 in 499 presentation, but set to 0 to prevent further RF reduction
                 out_sigma=1/2
             ),
             source_name='VISp5', target_name='SFT_gamma_sSC', out_size=self.area_size['sSC']
@@ -289,7 +290,7 @@ class Network:
                 in_channels=self.area_channels['VISp5'], 
                 out_channels=self.area_channels['sSC'],
                 gsh=GSH_1,
-                gsw=SSC_GSW, # NOTE: comes from slide 22 in 499 presentation
+                gsw=0, # SSC_GSW, # NOTE: comes from slide 22 in 499 presentation, but set to 0 to prevent further RF reduction
                 out_sigma=1/2
             ),
             source_name='VISp5', target_name='SFT_beta_sSC', out_size=self.area_size['sSC']
