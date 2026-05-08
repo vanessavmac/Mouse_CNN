@@ -106,6 +106,9 @@ class MouseNetCompletePool(nn.Module):
         assert all("SFT" not in bn_key for bn_key in self.BNs.keys()), "Expected no SFT modulation batch norms to be created in BNs."
 
     def _parse_sft_settings(self, sft_settings):
+        # Handle None or empty input
+        if sft_settings is None:
+            sft_settings = []
         settings = set(sft_settings)
         valid_settings = {"tanh_clamp", "layernorm", "only_beta"}
         unknown_settings = settings - valid_settings
