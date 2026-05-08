@@ -25,7 +25,7 @@ def generate_net(retinotopic=False):
     return net
 
 # NOTE: ENTRY POINT FOR MODEL LOADING; I always use mousenet_stock and no pretraining
-def load(architecture, pretraining=None):
+def load(architecture, pretraining=None, model_args={}):
     if architecture not in ("default", "retinotopic"):
         raise ValueError("Architecture must be one of default or retinotopic")  
     
@@ -45,7 +45,7 @@ def load(architecture, pretraining=None):
         with open(os.path.join(path, "retinotopics", "retinomap.pkl"), "rb") as file:
             retinomap = pickle.load(file)
     
-    model = MouseNetCompletePool(net, retinomap = retinomap)
+    model = MouseNetCompletePool(net, retinomap = retinomap, sft_settings=model_args.get("sft_settings", []))
     
 
     if pretraining == "kaiming" or None:

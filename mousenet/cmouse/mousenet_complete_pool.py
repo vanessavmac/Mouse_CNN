@@ -9,7 +9,7 @@ class MouseNetCompletePool(nn.Module):
     """
     torch model constructed by parameters provided in network.
     """
-    def __init__(self, network, mask=3, retinomap=None):
+    def __init__(self, network, mask=3, retinomap=None, sft_settings=[]):
         super(MouseNetCompletePool, self).__init__()
         self.Convs = nn.ModuleDict()
         # NOTE: No batch norm applied to the generated gamma/beta values, since they are just raw outputs of the SFT generator layers          
@@ -20,6 +20,12 @@ class MouseNetCompletePool(nn.Module):
         self.Retina = nn.ModuleDict()
         self.network = network
         self.retinomap = retinomap
+        self.SFT_LNs = nn.ModuleDict()
+        self.sft_settings = self._parse_sft_settings(sft_settings)
+        print(f"SFT settings: {self.sft_settings}")
+        
+        if "layernorm" in self.sft_settings:
+            self._initialize_sft_layernorms()
         
         G, _ = network.make_graph()
         self.top_sort = list(nx.topological_sort(G))
@@ -33,6 +39,10 @@ class MouseNetCompletePool(nn.Module):
 
                 self.Convs[layer_name] = Conv2dMask(params.in_channels, params.out_channels, params.kernel_size,
                                                         params.gsh, params.gsw, stride=params.stride, mask=mask, padding=params.padding)
+                if "SFT_gamma_" in layer.target_name or "SFT_beta_" in layer.target_name:
+                    nn.init.normal_(self.Convs[layer_name].weight, mean=0.0, std=0.01)
+                    if self.Convs[layer_name].bias is not None:
+                        nn.init.zeros_(self.Convs[layer_name].bias)
                 ## plotting Gaussian mask
                 #plt.title('%s_%s_%sx%s'%(e[0].replace('/',''), e[1].replace('/',''), params.kernel_size, params.kernel_size))
                 #plt.savefig('%s_%s'%(e[0].replace('/',''), e[1].replace('/','')))
@@ -95,6 +105,61 @@ class MouseNetCompletePool(nn.Module):
 
         assert all("SFT" not in bn_key for bn_key in self.BNs.keys()), "Expected no SFT modulation batch norms to be created in BNs."
 
+    def _parse_sft_settings(self, sft_settings):
+        settings = set(sft_settings)
+        valid_settings = {"tanh_clamp", "layernorm", "only_beta"}
+        unknown_settings = settings - valid_settings
+        if len(unknown_settings) != 0:
+            raise ValueError(
+                f"Unknown sft_settings flags: {sorted(unknown_settings)}. "
+                f"Expected subset of {sorted(valid_settings)}."
+            )
+        return settings
+
+    def _get_or_create_sft_ln(self, signal_name, tensor):
+        c, h, w = tensor.shape[1], tensor.shape[2], tensor.shape[3]
+        ln_key = f"{signal_name}__{c}_{h}_{w}"
+        if ln_key not in self.SFT_LNs:
+            self.SFT_LNs[ln_key] = nn.LayerNorm([c, h, w]).to(device=tensor.device, dtype=tensor.dtype)
+        return self.SFT_LNs[ln_key]
+
+    def _initialize_sft_layernorms(self):
+        for layer in self.network.layers:
+            if layer.__class__.__name__ != ConvLayer.__name__:
+                continue
+            if not ("SFT_gamma_" in layer.target_name or "SFT_beta_" in layer.target_name):
+                continue
+
+            target_area = layer.target_name.split("_")[-1]
+            c = int(self.network.area_channels[target_area])
+            h = int(self.network.area_size[target_area])
+            w = int(self.network.area_size[target_area])
+
+            signal_kind = "gamma" if "SFT_gamma_" in layer.target_name else "beta"
+            ln_key = f"{target_area}_{signal_kind}__{c}_{h}_{w}"
+            if ln_key not in self.SFT_LNs:
+                self.SFT_LNs[ln_key] = nn.LayerNorm([c, h, w])
+
+    def _apply_sft_transforms(self, gamma_raw, beta_raw, sft_settings, signal_prefix):
+        gamma = gamma_raw
+        beta = beta_raw
+
+        if "layernorm" in sft_settings:
+            beta = self._get_or_create_sft_ln(f"{signal_prefix}_beta", beta)(beta)
+            if "only_beta" not in sft_settings:
+                gamma = self._get_or_create_sft_ln(f"{signal_prefix}_gamma", gamma)(gamma)
+
+        if "tanh_clamp" in sft_settings:
+            beta = torch.tanh(beta)
+            if "only_beta" not in sft_settings:
+                gamma = torch.tanh(gamma)
+
+        if "only_beta" in sft_settings:
+            gamma = torch.ones_like(gamma)
+        else:
+            gamma = 1.0 + gamma
+
+        return gamma, beta
 
 
     def get_img_feature(self, x, area_list, flatten=False, return_gamma_beta=False, turn_on_modulation=True, no_pooling=False):
@@ -139,8 +204,9 @@ class MouseNetCompletePool(nn.Module):
 
                 # NOTE: no batch norm applied to the generated gamma/beta values, since they are just raw outputs of the SFT generator layers
                 # NOTE: VISp5 is the only source that modulates sSC, hardcoded the name      
-                gamma = self.Convs['VISp5SFT_gamma_sSC'](calc_graph["VISp5"])
-                beta = self.Convs['VISp5SFT_beta_sSC'](calc_graph["VISp5"])
+                gamma_raw = self.Convs['VISp5SFT_gamma_sSC'](calc_graph["VISp5"])
+                beta_raw = self.Convs['VISp5SFT_beta_sSC'](calc_graph["VISp5"])
+                gamma, beta = self._apply_sft_transforms(gamma_raw, beta_raw, self.sft_settings, "sSC")
 
                 gamma_calc_graph[area] = gamma
                 beta_calc_graph[area] = beta
@@ -200,8 +266,9 @@ class MouseNetCompletePool(nn.Module):
 
                 lp_pathway_description = lp_pathway_description[0]
 
-                gamma = calc_graph[f"SFT_gamma_{area.split('_')[-1]}"]
-                beta = calc_graph[f"SFT_beta_{area.split('_')[-1]}"]
+                gamma_raw = calc_graph[f"SFT_gamma_{area.split('_')[-1]}"]
+                beta_raw = calc_graph[f"SFT_beta_{area.split('_')[-1]}"]
+                gamma, beta = self._apply_sft_transforms(gamma_raw, beta_raw, self.sft_settings, area)
 
                 gamma_calc_graph[area] = gamma
                 beta_calc_graph[area] = beta
