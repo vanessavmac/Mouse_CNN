@@ -45,7 +45,7 @@ def load(architecture, pretraining=None, model_args={}):
         with open(os.path.join(path, "retinotopics", "retinomap.pkl"), "rb") as file:
             retinomap = pickle.load(file)
     
-    model = MouseNetCompletePool(net, retinomap = retinomap, sft_settings=model_args.get("sft_settings", []))
+    model = MouseNetCompletePool(net, retinomap = retinomap, sft_settings=model_args.get("sft_settings", []), use_normal_init=model_args.get("use_normal_init", True))
     
 
     if pretraining == "kaiming" or None:

@@ -9,7 +9,7 @@ class MouseNetCompletePool(nn.Module):
     """
     torch model constructed by parameters provided in network.
     """
-    def __init__(self, network, mask=3, retinomap=None, sft_settings=[]):
+    def __init__(self, network, mask=3, retinomap=None, sft_settings=[], use_normal_init=True):
         super(MouseNetCompletePool, self).__init__()
         self.Convs = nn.ModuleDict()
         # NOTE: No batch norm applied to the generated gamma/beta values, since they are just raw outputs of the SFT generator layers          
@@ -39,10 +39,17 @@ class MouseNetCompletePool(nn.Module):
 
                 self.Convs[layer_name] = Conv2dMask(params.in_channels, params.out_channels, params.kernel_size,
                                                         params.gsh, params.gsw, stride=params.stride, mask=mask, padding=params.padding)
-                if "SFT_gamma_" in layer.target_name or "SFT_beta_" in layer.target_name:
-                    nn.init.normal_(self.Convs[layer_name].weight, mean=0.0, std=0.01)
-                    if self.Convs[layer_name].bias is not None:
-                        nn.init.zeros_(self.Convs[layer_name].bias)
+                
+                if use_normal_init:
+                    if "SFT_gamma_" in layer.target_name or "SFT_beta_" in layer.target_name:
+                        print(f"Using normal initialization for layer {layer_name} with mean 0 and std 0.01 since use_normal_init is set to True.")
+
+                        nn.init.normal_(self.Convs[layer_name].weight, mean=0.0, std=0.01)
+                        if self.Convs[layer_name].bias is not None:
+                            nn.init.zeros_(self.Convs[layer_name].bias)
+                else:
+                    print(f"Using default initialization for layer {layer_name} since use_normal_init is set to False.")
+                
                 ## plotting Gaussian mask
                 #plt.title('%s_%s_%sx%s'%(e[0].replace('/',''), e[1].replace('/',''), params.kernel_size, params.kernel_size))
                 #plt.savefig('%s_%s'%(e[0].replace('/',''), e[1].replace('/','')))
@@ -110,7 +117,7 @@ class MouseNetCompletePool(nn.Module):
         if sft_settings is None:
             sft_settings = []
         settings = set(sft_settings)
-        valid_settings = {"tanh_clamp", "layernorm", "only_beta"}
+        valid_settings = {"tanh_clamp", "layernorm", "only_beta", "gamma_not_1"}
         unknown_settings = settings - valid_settings
         if len(unknown_settings) != 0:
             raise ValueError(
@@ -160,7 +167,10 @@ class MouseNetCompletePool(nn.Module):
         if "only_beta" in sft_settings:
             gamma = torch.ones_like(gamma)
         else:
-            gamma = 1.0 + gamma
+            if not "gamma_not_1" in sft_settings:
+                gamma = 1.0 + gamma
+            else:
+                gamma = gamma
 
         return gamma, beta
 
