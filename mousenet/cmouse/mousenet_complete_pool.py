@@ -151,7 +151,7 @@ class MouseNetCompletePool(nn.Module):
             # nn.Linear(HIDDEN_LINEAR, NUM_CLASSES),
         # )
 
-    def get_img_feature(self, x, area_list, flatten=False, no_pooling=False):
+    def get_img_feature(self, x, area_list, flatten=False, no_pooling=False, return_signals=False):
         """
         function for get activations from a list of layers for input x
         :param x: input image set Tensor with size (num_img, INPUT_SIZE[0], INPUT_SIZE[1], INPUT_SIZE[2])
@@ -161,6 +161,11 @@ class MouseNetCompletePool(nn.Module):
         """
         calc_graph = {}
 
+        signals = {
+            'regions': {},
+            'projections': {},
+        }
+
         for area in self.top_sort:
             if area == 'input':
                 continue
@@ -168,64 +173,60 @@ class MouseNetCompletePool(nn.Module):
             if area == 'LGNd' or area == 'LGNv':
                 layer = self.network.find_conv_source_target('input', area)
                 layer_name = layer.source_name + layer.target_name
-                calc_graph[area] =  nn.ReLU(inplace=True)(self.BNs[area](self.Convs[layer_name](x)))
+                conv_out = self.Convs[layer_name](x)
+                calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](conv_out))
+
+                if return_signals:
+                    signals['regions'][area] = calc_graph[area]
+                    signals['projections'][area] = {'input': conv_out}
                 continue
 
+            proj_conv_outs = {}
             for layer in self.network.layers:
                 if layer.target_name == area:
                     layer_name = layer.source_name + layer.target_name
+                    conv_out = self.Convs[layer_name](calc_graph[layer.source_name])
+                    proj_conv_outs[layer.source_name] = conv_out
+
                     if area not in calc_graph:
-                        calc_graph[area] = self.Convs[layer_name](
-                                calc_graph[layer.source_name]
-                            )
+                        calc_graph[area] = conv_out
                     else:
-                        calc_graph[area] = calc_graph[area] + self.Convs[layer_name](calc_graph[layer.source_name])
-                    
-            calc_graph2 = calc_graph.copy()
+                        calc_graph[area] = calc_graph[area] + conv_out
+
             calc_graph[area] = nn.ReLU(inplace=True)(
                 self.BNs[area](
                     calc_graph[area]
                 )
             )
-            # if calc_graph[area].sum() == 0:
-            #     pdb.set_trace()
-        
+
+            if return_signals:
+                signals['regions'][area] = calc_graph[area]
+                signals['projections'][area] = {src: co for src, co in proj_conv_outs.items()}
+
         if len(area_list) == 0:
             area_list = self.top_sort[1:] # if no area specified, return all areas except input
 
+        if return_signals:
+            def _detach(d):
+                if isinstance(d, torch.Tensor):
+                    return d.detach()
+                return {k: _detach(v) for k, v in d.items()}
+            signals = _detach(signals)
+
         if len(area_list) == 1:
-            if flatten:
-                return torch.flatten(calc_graph['%s'%(area_list[0])], 1)
-            else:
-                return calc_graph['%s'%(area_list[0])]
+            result = torch.flatten(calc_graph[area_list[0]], 1) if flatten else calc_graph[area_list[0]]
+            return (result, signals) if return_signals else result
+
         elif no_pooling:
-            re = {}
-            for area in area_list:
-                re[area] = calc_graph[area]
-            return re
+            re = {area: calc_graph[area] for area in area_list}
+            return (re, signals) if return_signals else re
+
         else:
             re = None
             for area in area_list:
-                if re is None:
-                    re = torch.nn.AdaptiveAvgPool2d(4) (calc_graph[area])
-                    # re = torch.flatten(
-                        # nn.ReLU(inplace=True)(self.BNs['%s_downsample'%area](self.Convs['%s_downsample'%area](calc_graph[area]))), 
-                        # 1)
-                else:
-                    re=torch.cat([torch.nn.AdaptiveAvgPool2d(4) (calc_graph[area]), re], axis=1)
-                    # re=torch.cat([
-                        # torch.flatten(
-                        # nn.ReLU(inplace=True)(self.BNs['%s_downsample'%area](self.Convs['%s_downsample'%area](calc_graph[area]))), 
-                        # 1), 
-                        # re], axis=1)
-                # if area == 'VISp5':
-                #     re=torch.flatten(self.visp5_downsampler(calc_graph['VISp5']), 1)
-                # else:
-                #     if re is not None:
-                #         re = torch.cat([torch.flatten(calc_graph[area], 1), re], axis=1)
-                #     else:
-                #         re = torch.flatten(calc_graph[area], 1)
-        return re
+                pooled = torch.nn.AdaptiveAvgPool2d(4)(calc_graph[area])
+                re = pooled if re is None else torch.cat([pooled, re], axis=1)
+            return (re, signals) if return_signals else re
 
     def forward(self, x):
         x = self.get_img_feature(x, OUTPUT_AREAS, flatten=False)
