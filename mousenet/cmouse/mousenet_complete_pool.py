@@ -175,17 +175,24 @@ class MouseNetCompletePool(nn.Module):
         return gamma, beta
 
 
-    def get_img_feature(self, x, area_list, flatten=False, return_gamma_beta=False, turn_on_modulation=True, no_pooling=False):
-        """
-        function for get activations from a list of layers for input x
-        :param x: input image set Tensor with size (num_img, INPUT_SIZE[0], INPUT_SIZE[1], INPUT_SIZE[2])
-        :param area_list: a list of area names
-        :return: if list length is 1, return the (flatten/unflatten) activation of that area
-                 if list length is >1, return concatenated flattened activation of the areas.
-        """
+    def get_img_feature(self, x, area_list, flatten=False, return_gamma_beta=False, turn_on_modulation=True, no_pooling=False, return_signals=False):
         calc_graph = {}
         gamma_calc_graph = {}
         beta_calc_graph = {}
+
+        # Stores all signals for tuning map analysis.
+        # Structure:
+        #   signals['regions'][area]             -> post-BN, post-ReLU activation [B, C, H, W]
+        #   signals['projections'][area][source] -> raw conv_out                  [B, C, H, W]
+        #   signals['sft_gamma'][area]           -> post-transform (gamma - 1)    [B, C, H, W]
+        #   signals['sft_beta'][area]            -> post-transform beta            [B, C, H, W]
+
+        signals = {
+            'regions': {},
+            'projections': {},
+            'sft_gamma': {},
+            'sft_beta': {},
+        }
 
         for area in self.top_sort:
             if area == 'input':
@@ -197,7 +204,12 @@ class MouseNetCompletePool(nn.Module):
                 layer_name = layer.source_name + layer.target_name
                 if area in calc_graph:
                     raise ValueError(f"Area {area} already exists in calc_graph, but this pathway only has 1 possible input.")
-                calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](self.Retina[layer_name](x)))
+                retina_out = self.Retina[layer_name](x)
+                calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](retina_out))
+
+                if return_signals:
+                    signals['regions'][area] = calc_graph[area]
+                    signals['projections'][area] = {'input': retina_out}
                 continue
             
             # Geniculate Pathway
@@ -206,14 +218,20 @@ class MouseNetCompletePool(nn.Module):
                 layer_name = layer.source_name + layer.target_name
                 if area in calc_graph:
                     raise ValueError(f"Area {area} already exists in calc_graph, but this pathway only has 1 possible input.")
-                calc_graph[area] =  nn.ReLU(inplace=True)(self.BNs[area](self.Convs[layer_name](calc_graph[layer.source_name])))
+                conv_out = self.Convs[layer_name](calc_graph[layer.source_name])
+                calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](conv_out))
+
+                if return_signals:
+                    signals['regions'][area] = calc_graph[area]
+                    signals['projections'][area] = {layer.source_name: conv_out}
                 continue
             
             # Extrageniculate Pathway
             if area == 'sSC':
                 layer = self.network.find_layer_by_source_target('RGCsSC', area, layer_type=ConvLayer.__name__)
                 layer_name = layer.source_name + layer.target_name
-                calc_graph[area] =  self.Convs[layer_name](calc_graph[layer.source_name]) # NOTE: BN and ReLU applied after modulation
+                conv_out = self.Convs[layer_name](calc_graph[layer.source_name]) # NOTE: BN and ReLU applied after modulation
+                calc_graph[area] = conv_out
 
                 # NOTE: no batch norm applied to the generated gamma/beta values, since they are just raw outputs of the SFT generator layers
                 # NOTE: VISp5 is the only source that modulates sSC, hardcoded the name      
@@ -225,10 +243,17 @@ class MouseNetCompletePool(nn.Module):
                 beta_calc_graph[area] = beta
 
                 if turn_on_modulation:
-                    calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](gamma * calc_graph[area] + beta))
+                    modulated = gamma * calc_graph[area] + beta
                 else:
-                    calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](calc_graph[area]))
+                    modulated = calc_graph[area]
 
+                calc_graph[area] = nn.ReLU(inplace=True)(self.BNs[area](modulated))
+
+                if return_signals:
+                    signals['regions'][area] = calc_graph[area]
+                    signals['projections'][area] = {layer.source_name: conv_out}
+                    signals['sft_gamma'][area] = gamma - 1.0    # post-transform gamma
+                    signals['sft_beta'][area]  = beta           # post-transform beta
                 continue
             
             if "SFT_gamma_" in area or "SFT_beta_" in area:
@@ -242,28 +267,28 @@ class MouseNetCompletePool(nn.Module):
 
             # V1/HVAs and inputs to the LP
             found_layer_for_area = False
+            proj_conv_outs = {}   # source -> raw conv output, collected for BN rescaling
+
             for layer in self.network.layers:
                 if layer.__class__.__name__ == ConvLayer.__name__ and layer.target_name == area:
                     assert "LP_" not in area, f"Expected area {area} to not contain 'LP_' since it's a target of a ConvLayer, but got {area}"
 
                     layer_name = layer.source_name + layer.target_name
-                    if area not in calc_graph:
-                        calc_graph[area] = self.Convs[layer_name](
-                                calc_graph[layer.source_name]
-                            )
-                    else:
-                        calc_graph[area] = calc_graph[area] + self.Convs[layer_name](calc_graph[layer.source_name])
-                    
+                    conv_out = self.Convs[layer_name](calc_graph[layer.source_name])
+                    proj_conv_outs[layer.source_name] = conv_out
+
+                    calc_graph[area] = conv_out if area not in calc_graph \
+                        else calc_graph[area] + conv_out
                     found_layer_for_area = True
 
                 elif (layer.__class__.__name__ == LPConvInputMultipleTargets.__name__ or layer.__class__.__name__ == LPCustomConvInputMultipleTargets.__name__) and area in layer.target_names:
                     assert "LP_" in area, f"Expected area {area} to contain 'LP_' since it's a target of an LPConvInputMultipleTargets or LPCustomConvInputMultipleTargets layer."
 
-                    if area not in calc_graph:
-                        calc_graph[area] = self.LP_input_layers[layer.source_name](calc_graph[layer.source_name])
-                    else:
-                        calc_graph[area] = calc_graph[area] + self.LP_input_layers[layer.source_name](calc_graph[layer.source_name])
+                    conv_out = self.LP_input_layers[layer.source_name](calc_graph[layer.source_name])
+                    proj_conv_outs[layer.source_name] = conv_out
 
+                    calc_graph[area] = conv_out if area not in calc_graph \
+                        else calc_graph[area] + conv_out
                     found_layer_for_area = True
             
             if not found_layer_for_area:
@@ -271,14 +296,8 @@ class MouseNetCompletePool(nn.Module):
             
             # Perform modulation if required
             lp_pathway_description = get_lp_pathways_description(area)
-            
-            if len(lp_pathway_description) == 0:
-                pass # print(f"{area} does not receive input from the LP, skipping modulation.")
-            else:
+            if len(lp_pathway_description) > 0:
                 assert len(lp_pathway_description) == 1, f"Expected exactly one LP pathway description for area {area}, but got {len(lp_pathway_description)}. Check get_lp_pathways_description function."
-
-                lp_pathway_description = lp_pathway_description[0]
-
                 gamma_raw = calc_graph[f"SFT_gamma_{area.split('_')[-1]}"]
                 beta_raw = calc_graph[f"SFT_beta_{area.split('_')[-1]}"]
                 gamma, beta = self._apply_sft_transforms(gamma_raw, beta_raw, self.sft_settings, area)
@@ -288,8 +307,10 @@ class MouseNetCompletePool(nn.Module):
 
                 if turn_on_modulation:
                     calc_graph[area] = gamma * calc_graph[area] + beta
-                else:
-                    pass
+                
+                if return_signals:
+                    signals['sft_gamma'][area] = gamma - 1.0 # subtract 1 constant gamma = 1 doesn't affect tuning map
+                    signals['sft_beta'][area]  = beta
 
             # Apply batch norm and relu after modulation (if applicable) or after summing inputs (if no modulation)
             calc_graph[area] = nn.ReLU(inplace=True)(
@@ -300,52 +321,47 @@ class MouseNetCompletePool(nn.Module):
             # if calc_graph[area].sum() == 0:
             #     pdb.set_trace()
         
+            # Store signals after BN is finalised (running stats updated)
+            if return_signals:
+                signals['regions'][area] = calc_graph[area]
+                signals['projections'][area] = {src: co for src, co in proj_conv_outs.items()}
+
+
         if len(area_list) == 0:
-            area_list = calc_graph.keys()
+            area_list = list(calc_graph.keys())
+
+        if return_signals:
+            # Detach everything so analysis code doesn't hold the graph
+            def _detach(d):
+                if isinstance(d, torch.Tensor):
+                    return d.detach()
+                return {k: _detach(v) for k, v in d.items()}
+            signals = _detach(signals)
 
         if len(area_list) == 1:
             area = area_list[0]
             result = torch.flatten(calc_graph[area], 1) if flatten else calc_graph[area]
             if return_gamma_beta:
-                return result, gamma_calc_graph, beta_calc_graph
-            else:
-                return result
+                return (result, gamma_calc_graph, beta_calc_graph,
+                        signals) if return_signals else (result, gamma_calc_graph, beta_calc_graph)
+            return (result, signals) if return_signals else result
+
         elif no_pooling:
-            re = {}
-            for area in area_list:
-                re[area] = calc_graph[area]
-            
+            re = {area: calc_graph[area] for area in area_list}
             if return_gamma_beta:
-                return re, gamma_calc_graph, beta_calc_graph
-            else:
-                return re
+                return (re, gamma_calc_graph, beta_calc_graph,
+                        signals) if return_signals else (re, gamma_calc_graph, beta_calc_graph)
+            return (re, signals) if return_signals else re
+
         else:
             re = None
             for area in area_list:
-                if re is None:
-                    re = torch.nn.AdaptiveAvgPool2d(4) (calc_graph[area])
-                    # re = torch.flatten(
-                        # nn.ReLU(inplace=True)(self.BNs['%s_downsample'%area](self.Convs['%s_downsample'%area](calc_graph[area]))), 
-                        # 1)
-                else:
-                    re=torch.cat([torch.nn.AdaptiveAvgPool2d(4) (calc_graph[area]), re], axis=1)
-                    # re=torch.cat([
-                        # torch.flatten(
-                        # nn.ReLU(inplace=True)(self.BNs['%s_downsample'%area](self.Convs['%s_downsample'%area](calc_graph[area]))), 
-                        # 1), 
-                        # re], axis=1)
-                # if area == 'VISp5':
-                #     re=torch.flatten(self.visp5_downsampler(calc_graph['VISp5']), 1)
-                # else:
-                #     if re is not None:
-                #         re = torch.cat([torch.flatten(calc_graph[area], 1), re], axis=1)
-                #     else:
-                #         re = torch.flatten(calc_graph[area], 1)
-        
+                pooled = torch.nn.AdaptiveAvgPool2d(4)(calc_graph[area])
+                re = pooled if re is None else torch.cat([pooled, re], axis=1)
         if return_gamma_beta:
-            return re, gamma_calc_graph, beta_calc_graph
-        
-        return re
+            return (re, gamma_calc_graph, beta_calc_graph,
+                    signals) if return_signals else (re, gamma_calc_graph, beta_calc_graph)
+        return (re, signals) if return_signals else re
 
     def forward(self, x):
         x = self.get_img_feature(x, OUTPUT_AREAS, flatten=False)
